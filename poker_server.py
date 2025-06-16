@@ -28,9 +28,9 @@ class ActionType(Enum):
 class Card:
     suit: str  # hearts, diamonds, clubs, spades
     rank: str  # 2-10, jack, queen, king, ace
-    
+
     def __post_init__(self):
-        # Map rank names to match your image files
+        # Map rank names to match your image files, but only if not already mapped
         if self.rank == "J":
             self.rank = "jack"
         elif self.rank == "Q":
@@ -39,7 +39,8 @@ class Card:
             self.rank = "king"
         elif self.rank == "A":
             self.rank = "ace"
-        
+        # If already mapped, do nothing
+
         # Map suit names to match your image files
         suit_mapping = {
             "hearts": "heart",
@@ -49,17 +50,24 @@ class Card:
         }
         if self.suit in suit_mapping:
             self.suit = suit_mapping[self.suit]
-    
+
     def get_image_name(self):
         return f"{self.suit}_{self.rank}.jpg"
-    
+
     def get_value(self):
         if self.rank in ['jack', 'queen', 'king']:
             return {'jack': 11, 'queen': 12, 'king': 13}[self.rank]
         elif self.rank == 'ace':
             return 14
         else:
-            return int(self.rank)
+            try:
+                value = int(self.rank)
+                if 2 <= value <= 10:
+                    return value
+                else:
+                    raise ValueError(f"Invalid card rank: {self.rank}")
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid card rank: {self.rank}")
 
 @dataclass
 class Player:
@@ -96,7 +104,7 @@ class PokerGame:
     def create_deck(self):
         """Creates and shuffles a standard 52-card deck."""
         suits = ['hearts', 'diamonds', 'clubs', 'spades']
-        ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'jack', 'queen', 'king', 'ace']
+        ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
         self.deck = [Card(suit, rank) for suit in suits for rank in ranks]
         random.shuffle(self.deck)
     
@@ -411,7 +419,11 @@ class PokerGame:
         """Evaluate poker hand strength. Returns (hand_rank, tiebreakers)"""
         all_cards = player_cards + community_cards
         all_cards.sort(key=lambda x: x.get_value(), reverse=True)
-        
+
+        # If there are less than 5 cards, return high card only (not enough cards for other hands)
+        if len(all_cards) < 5:
+            return (0, sorted([card.get_value() for card in all_cards], reverse=True))
+
         # Count suits and ranks
         suits = {}
         ranks = {}
@@ -573,6 +585,12 @@ class PokerGame:
                         final_winners.append(winner_id)
             
         self.pot = 0 # Pot is fully distributed
+
+        # Remove players with zero chips after distributing the pot
+        players_to_remove = [pid for pid, p in self.players.items() if p.chips <= 0]
+        for pid in players_to_remove:
+            print(f"Player {self.players[pid].name} has no chips left and will be removed from the game.")
+            self.remove_player(pid)
 
         return final_winners
     
@@ -861,10 +879,15 @@ class PokerServer:
                 self.handle_showdown() # Ensure showdown logic runs
                 time.sleep(5) # Allow clients to see showdown results
                 # Reset has_acted_this_round for all players for the new hand
-                for player in self.game.players.values():
+                for player in list(self.game.players.values()):
                     player.has_acted_this_round = False
-                self.game.start_new_hand()
-                self.broadcast_game_state()
+                # Only start a new hand if there are at least 2 players
+                if len([p for p in self.game.players.values() if p.chips > 0]) >= 2:
+                    self.game.start_new_hand()
+                    self.broadcast_game_state()
+                else:
+                    self.game.game_state = GameState.WAITING
+                    self.broadcast_game_state()
                 
             # State: GAME_OVER - Not enough players or game ended
             elif self.game.game_state == GameState.GAME_OVER:
@@ -887,11 +910,14 @@ class PokerServer:
                 # Reset has_acted_this_round for all players for the new hand
                 for player in self.game.players.values():
                     player.has_acted_this_round = False
-                self.game.start_new_hand()
-                self.broadcast_game_state()
+                if self.game.start_new_hand():
+                    self.broadcast_game_state()
+                    time.sleep(1)  # Give time for clients to process state update
+                else:
+                    self.game.game_state = GameState.WAITING
+                    self.broadcast_game_state()
 
 
-# In PokerServer.handle_showdown method:
     def handle_showdown(self):
         print("Handling showdown...")
         winners = self.game.determine_winners()
@@ -933,21 +959,37 @@ class PokerServer:
                 'winning_hand_type': winning_hand_type # <-- This is the new field
             }
             self.broadcast(json.dumps(winning_message).encode('utf-8') + b'\n')
+            # Only broadcast game state after a short delay to avoid double notification
+            time.sleep(0.5)
+            self.broadcast_game_state()
         else:
             print("No winners determined (e.g., all folded before showdown).")
-        
-        self.broadcast_game_state()
-        
+            self.broadcast_game_state()
+
     def send_to_client(self, player_id: str, message: dict):
         """Sends a JSON message to a specific client."""
         if player_id in self.clients:
             try:
-                self.clients[player_id].send(json.dumps(message).encode('utf-8') + b'\n') # Add newline for client parsing
+                msg = json.dumps(message)
+                self.clients[player_id].send(msg.encode('utf-8') + b'\n')
             except Exception as e:
-                print(f"Error sending message to client {player_id}: {e}")
+                print(f"Error sending message to {player_id}: {e}")
+                if player_id in self.clients:
+                    self.clients[player_id].close()
+                    del self.clients[player_id]
+                self.game.remove_player(player_id)
 
     def broadcast_game_state(self):
         """Broadcasts the current game state to all connected clients, with player-specific card visibility."""
+        # Remove clients whose player has been removed (e.g., out of chips)
+        for player_id in list(self.clients.keys()):
+            if player_id not in self.game.players:
+                try:
+                    self.clients[player_id].close()
+                except Exception:
+                    pass
+                del self.clients[player_id]
+
         # Send individual game state to each player (revealing their own cards)
         for player_id, client_socket in list(self.clients.items()):
             try:
@@ -963,7 +1005,7 @@ class PokerServer:
                 if player_id in self.clients:
                     del self.clients[player_id]
                 self.game.remove_player(player_id) # Remove player from game if connection breaks
-    
+
     def broadcast(self, message: bytes):
         """Broadcasts a raw byte message to all connected clients."""
         for player_id, client_socket in list(self.clients.items()):
@@ -982,4 +1024,3 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("\nServer shutting down...")
         server.socket.close()
-
