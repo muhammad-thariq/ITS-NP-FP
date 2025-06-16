@@ -124,106 +124,231 @@ class PokerGame:
             # If less than 2 players remain and game is not waiting, end the game
             if len([p for p in self.players.values() if p.chips > 0]) < 2 and self.game_state != GameState.WAITING:
                 self.game_state = GameState.GAME_OVER
-    
-    def start_new_hand(self):
-        """Starts a new hand of poker."""
-        active_players_in_game = [p for p in self.players.values() if p.chips > 0]
-        if len(active_players_in_game) < 2:
-            print("Not enough active players to start a new hand.")
-            self.game_state = GameState.WAITING
-            return False
+
+
+    def _prepare_for_new_hand(self) -> List[Player]:
+        """
+        Resets player and game states for a new hand and returns active players.
+        An active player is one who has more than 0 chips.
+        """
+        print("Preparing for new hand, resetting player states.")
+        active_players = []
+        
+        # Reset all players and identify who is still active.
+        for player in self.players.values():
+            if player.chips > 0:
+                active_players.append(player)
             
-        self.create_deck()
+            # Reset hand-specific attributes for everyone
+            player.cards = []
+            player.current_bet = 0
+            player.total_bet = 0
+            player.is_folded = False
+            player.is_all_in = False
+            player.has_acted_this_round = False
+        
+        # Reset hand-specific game attributes
         self.community_cards = []
         self.pot = 0
         self.current_bet = 0
         self.action_history = []
         self.last_raiser = None
-
-        # Rotate dealer position to the next active player
-        players_ids = list(self.players.keys())
-        # Find the index of the next active player after the current dealer
-        next_dealer_found = False
-        for i in range(len(players_ids)):
-            potential_dealer_index = (self.dealer_position + 1 + i) % len(players_ids)
-            potential_dealer_id = players_ids[potential_dealer_index]
-            if self.players[potential_dealer_id].chips > 0: # Only active players can be dealer
-                self.dealer_position = potential_dealer_index
-                next_dealer_found = True
-                break
-        if not next_dealer_found: # Should not happen if len(active_players_in_game) >= 2
-            print("Error: Could not find a new dealer.")
+        self.create_deck()
+        
+        return active_players
+    
+    def start_new_hand(self):
+        """Starts a new hand of poker using the prepared active players."""
+        active_players = self._prepare_for_new_hand()
+        
+        if len(active_players) < 2:
+            print("Not enough active players to start a new hand.")
+            self.game_state = GameState.GAME_OVER
             return False
 
-        # Reset player states for the new hand
-        for player_id in players_ids:
-            player = self.players[player_id]
-            player.cards = []
-            player.current_bet = 0
-            player.total_bet = 0 # Reset total bet for the new hand
-            player.is_folded = False
-            player.is_all_in = False
-            player.has_acted_this_round = False # Reset for the new hand
+        # --- Dealer Button Rotation ---
+        players_ids = list(self.players.keys())
+        if self.dealer_position == -1: # First hand
+            self.dealer_position = 0
+        else:
+            # Find the next active player to be the dealer
+            found_dealer = False
+            for i in range(1, len(players_ids) + 1):
+                next_dealer_index = (self.dealer_position + i) % len(players_ids)
+                if self.players[players_ids[next_dealer_index]].chips > 0:
+                    self.dealer_position = next_dealer_index
+                    found_dealer = True
+                    break
+            if not found_dealer:
+                print("CRITICAL ERROR: Could not find an active player for the dealer button."); return False
 
-        # Deal hole cards
+        # --- Deal Cards ---
         for _ in range(2):
-            for player_id in players_ids:
-                player = self.players[player_id]
+            for player in active_players:
                 if self.deck:
                     player.cards.append(self.deck.pop())
         
+        # --- Post Blinds and Set First Player ---
         self.post_blinds()
         self.game_state = GameState.PRE_FLOP
         
-        # Determine who starts the pre-flop betting round (UTG, or player after Big Blind)
-        # It's the first active player after the Big Blind
-        self.current_player_index = self._get_player_index_after_dealer(self.dealer_position, 3)
-        if self.current_player_index == -1: # Fallback if no player found after BB (e.g., only 2 players)
-             self.current_player_index = self._get_player_index_after_dealer(self.dealer_position, 0) # Start from player after dealer
-             
-        print(f"New hand started. Dealer: {self.players[players_ids[self.dealer_position]].name}. First to act: {self.players[players_ids[self.current_player_index]].name}")
+        dealer_name = self.players[players_ids[self.dealer_position]].name
+        current_player_name = self.players[players_ids[self.current_player_index]].name
+        print(f"New hand started. Dealer: {dealer_name}. First to act: {current_player_name}")
         return True
     
-    def post_blinds(self):
-        """Handles posting of small and big blinds."""
-        players_list = list(self.players.values())
-        players_ids = list(self.players.keys())
 
-        # Small blind position: 1 after dealer
-        sb_pos_index = (self.dealer_position + 1) % len(players_ids)
-        sb_player = players_list[sb_pos_index]
+    # def start_new_hand(self):
+    #     """Starts a new hand of poker."""
+    #     active_players_in_game = [p for p in self.players.values() if p.chips > 0]
+    #     if len(active_players_in_game) < 2:
+    #         print("Not enough active players to start a new hand.")
+    #         self.game_state = GameState.WAITING
+    #         return False
+            
+    #     self.create_deck()
+    #     self.community_cards = []
+    #     self.pot = 0
+    #     self.current_bet = 0
+    #     self.action_history = []
+    #     self.last_raiser = None
+
+    #     # Rotate dealer position to the next active player
+    #     players_ids = list(self.players.keys())
+    #     # Find the index of the next active player after the current dealer
+    #     next_dealer_found = False
+    #     for i in range(len(players_ids)):
+    #         potential_dealer_index = (self.dealer_position + 1 + i) % len(players_ids)
+    #         potential_dealer_id = players_ids[potential_dealer_index]
+    #         if self.players[potential_dealer_id].chips > 0: # Only active players can be dealer
+    #             self.dealer_position = potential_dealer_index
+    #             next_dealer_found = True
+    #             break
+    #     if not next_dealer_found: # Should not happen if len(active_players_in_game) >= 2
+    #         print("Error: Could not find a new dealer.")
+    #         return False
+
+    #     # Reset player states for the new hand
+    #     for player_id in players_ids:
+    #         player = self.players[player_id]
+    #         player.cards = []
+    #         player.current_bet = 0
+    #         player.total_bet = 0 # Reset total bet for the new hand
+    #         player.is_folded = False
+    #         player.is_all_in = False
+    #         player.has_acted_this_round = False # Reset for the new hand
+
+    #     # Deal hole cards
+    #     for _ in range(2):
+    #         for player_id in players_ids:
+    #             player = self.players[player_id]
+    #             if self.deck:
+    #                 player.cards.append(self.deck.pop())
         
-        # Big blind position: 2 after dealer
-        bb_pos_index = (self.dealer_position + 2) % len(players_ids)
-        bb_player = players_list[bb_pos_index]
+    #     self.post_blinds()
+    #     self.game_state = GameState.PRE_FLOP
+        
+    #     # Determine who starts the pre-flop betting round (UTG, or player after Big Blind)
+    #     # It's the first active player after the Big Blind
+    #     self.current_player_index = self._get_player_index_after_dealer(self.dealer_position, 3)
+    #     if self.current_player_index == -1: # Fallback if no player found after BB (e.g., only 2 players)
+    #          self.current_player_index = self._get_player_index_after_dealer(self.dealer_position, 0) # Start from player after dealer
+             
+    #     print(f"New hand started. Dealer: {self.players[players_ids[self.dealer_position]].name}. First to act: {self.players[players_ids[self.current_player_index]].name}")
+    #     return True
+    
+        # def post_blinds(self):
+        #     """Handles posting of small and big blinds."""
+        #     players_list = list(self.players.values())
+        #     players_ids = list(self.players.keys())
 
-        # Handle cases with fewer than 3 players (e.g., heads-up)
-        if len(players_list) == 2:
-            # In heads-up, dealer is small blind, other player is big blind
-            sb_player = players_list[self.dealer_position]
-            bb_player = players_list[(self.dealer_position + 1) % len(players_list)]
+        #     # Small blind position: 1 after dealer
+        #     sb_pos_index = (self.dealer_position + 1) % len(players_ids)
+        #     sb_player = players_list[sb_pos_index]
+            
+        #     # Big blind position: 2 after dealer
+        #     bb_pos_index = (self.dealer_position + 2) % len(players_ids)
+        #     bb_player = players_list[bb_pos_index]
 
-        # Small blind
+        #     # Handle cases with fewer than 3 players (e.g., heads-up)
+        #     if len(players_list) == 2:
+        #         # In heads-up, dealer is small blind, other player is big blind
+        #         sb_player = players_list[self.dealer_position]
+        #         bb_player = players_list[(self.dealer_position + 1) % len(players_list)]
+
+        #     # Small blind
+        #     sb_amount = min(self.small_blind, sb_player.chips)
+        #     sb_player.chips -= sb_amount
+        #     sb_player.current_bet += sb_amount
+        #     sb_player.total_bet += sb_amount
+        #     self.pot += sb_amount
+        #     sb_player.has_acted_this_round = True # Blinds count as actions
+        #     print(f"{sb_player.name} posted Small Blind of ${sb_amount}")
+            
+        #     # Big blind
+        #     bb_amount = min(self.big_blind, bb_player.chips)
+        #     bb_player.chips -= bb_amount
+        #     bb_player.current_bet += bb_amount
+        #     bb_player.total_bet += bb_amount
+        #     self.pot += bb_amount
+        #     bb_player.has_acted_this_round = True # Blinds count as actions
+        #     print(f"{bb_player.name} posted Big Blind of ${bb_amount}")
+            
+        #     self.current_bet = bb_player.current_bet
+        #     self.last_raiser = bb_player.id # Big blind is the initial "raiser" for checking purposes
+
+
+    def post_blinds(self):
+        """Handles posting blinds by finding the next active players."""
+        player_keys = list(self.players.keys())
+        num_players = len(player_keys)
+        
+        # Helper function to find the next active player's index from a start point
+        def find_next_active_player_index(start_index):
+            for i in range(num_players):
+                next_index = (start_index + i) % num_players
+                if self.players[player_keys[next_index]].chips > 0:
+                    return next_index
+            return -1 # Should not happen if there are >= 2 active players
+
+        # --- Determine Blind Positions ---
+        active_players_count = len([p for p in self.players.values() if p.chips > 0])
+        
+        if active_players_count == 2: # Heads-up
+            sb_index = self.dealer_position
+            bb_index = find_next_active_player_index(self.dealer_position + 1)
+            self.current_player_index = sb_index # Dealer/SB acts first pre-flop
+        else: # 3+ players
+            sb_index = find_next_active_player_index(self.dealer_position + 1)
+            bb_index = find_next_active_player_index(sb_index + 1)
+            self.current_player_index = find_next_active_player_index(bb_index + 1)
+        
+        if sb_index == -1 or bb_index == -1:
+            print("Error: could not find players for blinds."); return
+
+        # --- Post Blinds ---
+        sb_player = self.players[player_keys[sb_index]]
         sb_amount = min(self.small_blind, sb_player.chips)
         sb_player.chips -= sb_amount
         sb_player.current_bet += sb_amount
         sb_player.total_bet += sb_amount
         self.pot += sb_amount
-        sb_player.has_acted_this_round = True # Blinds count as actions
+        if sb_player.chips == 0: sb_player.is_all_in = True
         print(f"{sb_player.name} posted Small Blind of ${sb_amount}")
-        
-        # Big blind
+
+        bb_player = self.players[player_keys[bb_index]]
         bb_amount = min(self.big_blind, bb_player.chips)
         bb_player.chips -= bb_amount
         bb_player.current_bet += bb_amount
         bb_player.total_bet += bb_amount
         self.pot += bb_amount
-        bb_player.has_acted_this_round = True # Blinds count as actions
+        if bb_player.chips == 0: bb_player.is_all_in = True
         print(f"{bb_player.name} posted Big Blind of ${bb_amount}")
-        
-        self.current_bet = bb_player.current_bet
-        self.last_raiser = bb_player.id # Big blind is the initial "raiser" for checking purposes
 
+        self.current_bet = bb_player.current_bet
+        self.last_raiser = bb_player.id
+
+        
     def _get_player_index_after_dealer(self, start_pos: int, offset: int = 1) -> int:
         """
         Finds the index of the next active player to act, starting from an offset
