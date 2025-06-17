@@ -6,6 +6,7 @@ import json
 import uuid
 import os
 from PIL import Image, ImageTk
+import pygame
 
 class PokerClient:
     def __init__(self):
@@ -26,33 +27,73 @@ class PokerClient:
         self.current_player_id = None
         self.dealer_player_id = None
         
-        # Card images
+        # Image, Audio, and UI state
         self.card_images = {}
         self.card_back_image = None
+        self.original_bg_image = None
+        self._resize_job = None # ### PERUBAHAN: Variabel untuk debouncing ###
+
+        self.initialize_audio()
         self.load_card_images()
-        
         self.player_widgets = {}
         
         self.setup_ui()
         self.setup_connection_dialog()
         
+        self.root.bind('<Configure>', self.on_window_resize)
+
+    def initialize_audio(self):
+        try:
+            pygame.mixer.init()
+            pygame.mixer.music.load("assets/background_music.mp3")
+            pygame.mixer.music.set_volume(0.3)
+            self.button_sound = pygame.mixer.Sound("assets/button_click.wav")
+            self.button_sound.set_volume(0.6)
+            print("Audio berhasil diinisialisasi.")
+        except Exception as e:
+            print(f"Tidak dapat memuat audio: {e}. Fitur audio tidak akan aktif.")
+            self.button_sound = None
+
+    def play_button_sound(self):
+        if self.button_sound:
+            self.button_sound.play()
+    
+    ### PERUBAHAN: Metode perform_resize baru ###
+    def perform_resize(self, event):
+        """Fungsi yang benar-benar melakukan resize gambar. Dipanggil setelah jeda."""
+        if not self.original_bg_image:
+            return
+
+        new_width = self.root.winfo_width()
+        new_height = self.root.winfo_height()
+        
+        # Opsi lain jika masih terasa lambat: ganti LANCZOS dengan BILINEAR
+        # resized_img = self.original_bg_image.resize((new_width, new_height), Image.Resampling.BILINEAR)
+        resized_img = self.original_bg_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        self.background_photo = ImageTk.PhotoImage(resized_img)
+        self.bg_label.configure(image=self.background_photo)
+
+    ### PERUBAHAN: Metode on_window_resize sekarang melakukan debouncing ###
+    def on_window_resize(self, event):
+        """Menerima event resize dan menjadwalkan ulang job resize (debouncing)."""
+        if self._resize_job:
+            self.root.after_cancel(self._resize_job)
+        self._resize_job = self.root.after(200, lambda: self.perform_resize(event))
+
     def load_card_images(self):
-        """Load all card images from the cards folder"""
         cards_folder = "assets/cards"
         if not os.path.exists(cards_folder):
             messagebox.showerror("Error", "Folder 'assets/cards' tidak ditemukan!")
             return
         
         try:
-            # POINT 1: Perbesar ukuran kartu
             new_size = (80, 112)
-
-            back_path = os.path.join(cards_folder, "back_design.jpg")
+            back_path = os.path.join(cards_folder, "card_back.jpg")
             if os.path.exists(back_path):
-                img = Image.open(back_path)
-                img = img.resize(new_size, Image.Resampling.LANCZOS) # Ukuran baru
+                img = Image.open(back_path).resize(new_size, Image.Resampling.LANCZOS)
                 self.card_back_image = ImageTk.PhotoImage(img)
-                self.card_images['back_design.jpg'] = self.card_back_image
+                self.card_images['card_back.jpg'] = self.card_back_image
             else:
                 print(f"Peringatan: {back_path} tidak ditemukan.")
             
@@ -64,24 +105,17 @@ class PokerClient:
                     filename = f"{suit}_{rank}.jpg"
                     filepath = os.path.join(cards_folder, filename)
                     if os.path.exists(filepath):
-                        img = Image.open(filepath)
-                        img = img.resize(new_size, Image.Resampling.LANCZOS) # Ukuran baru
+                        img = Image.open(filepath).resize(new_size, Image.Resampling.LANCZOS)
                         self.card_images[filename] = ImageTk.PhotoImage(img)
-                    else:
-                        print(f"Peringatan: {filepath} tidak ditemukan.")
-                        
         except Exception as e:
             print(f"Error loading card images: {e}")
-            messagebox.showwarning("Warning", "Beberapa gambar kartu tidak dapat dimuat.")
-    
+
     def setup_connection_dialog(self):
-        """Show connection dialog at startup"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Connect to Poker Game")
         dialog.geometry("400x250")
         dialog.grab_set()
         dialog.configure(bg='#C70300')
-        
         dialog.transient(self.root)
         dialog.protocol("WM_DELETE_WINDOW", lambda: self.root.quit())
         
@@ -97,93 +131,75 @@ class PokerClient:
         def connect():
             server_ip = ip_entry.get().strip()
             name = name_entry.get().strip()
-            
             if not server_ip or not name:
                 messagebox.showerror("Error", "Please fill in all fields", parent=dialog)
                 return
             
             self.player_name = name
             if self.connect_to_server(server_ip):
+                try:
+                    pygame.mixer.music.play(loops=-1)
+                except Exception as e:
+                    print(f"Gagal memainkan musik latar: {e}")
                 dialog.destroy()
             else:
-                messagebox.showerror("Error", "Failed to connect to server. Is the server running?", parent=dialog)
+                messagebox.showerror("Error", "Failed to connect to server.", parent=dialog)
         
         tk.Button(dialog, text="Connect", command=connect, bg='#2C2C2C', fg='white', font=('Arial', 12), padx=20, pady=5).pack(pady=20)
         
     def setup_ui(self):
-        """Setup the main game UI with a Persona 5 theme"""
-        # 1. Set Background Image
         try:
             bg_image_path = os.path.join("assets", "background.png")
-            self.background_image = Image.open(bg_image_path).resize((1200, 800), Image.Resampling.LANCZOS)
-            self.background_photo = ImageTk.PhotoImage(self.background_image)
-            bg_label = tk.Label(self.root, image=self.background_photo)
-            bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+            self.original_bg_image = Image.open(bg_image_path)
+            resized_img = self.original_bg_image.resize((1200, 800), Image.Resampling.LANCZOS)
+            self.background_photo = ImageTk.PhotoImage(resized_img)
+            self.bg_label = tk.Label(self.root, image=self.background_photo, borderwidth=0)
+            self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
         except FileNotFoundError:
             print("Peringatan: 'assets/background.png' tidak ditemukan.")
             self.root.configure(bg='black')
+            self.original_bg_image = None
 
-        # 2. Area Utama
-        self.pot_label = tk.Label(self.root, text="Pot: $0", bg='#1C1C1C', fg='white', font=('Arial', 16, 'bold'), padx=10, pady=5)
+        self.pot_label = tk.Label(self.root, text="Pot: $0", bg='#1C1C1C', fg='white', font=('Arial', 16, 'bold'))
         self.pot_label.place(relx=0.5, rely=0.05, anchor='center')
-
-        self.game_state_label = tk.Label(self.root, text="Waiting for players...", bg='#1C1C1C', fg='white', font=('Arial', 12))
+        self.game_state_label = tk.Label(self.root, text="Waiting...", bg='#1C1C1C', fg='white', font=('Arial', 12))
         self.game_state_label.place(relx=0.5, rely=0.1, anchor='center')
-        
         community_bg_frame = tk.Frame(self.root, bg='black', bd=2, relief=tk.SOLID)
-        community_bg_frame.place(relx=0.5, rely=0.45, relwidth=0.5, relheight=0.25, anchor='center') # Sedikit lebih tinggi untuk kartu besar
+        community_bg_frame.place(relx=0.5, rely=0.45, anchor='center')
         self.community_cards_frame = tk.Frame(community_bg_frame, bg='black')
-        self.community_cards_frame.pack(expand=True)
-        
-        # 3. Area Tombol Aksi (Kiri Bawah)
+        self.community_cards_frame.pack(expand=True, padx=5, pady=5)
         actions_frame = tk.Frame(self.root, bg='black', bd=0)
         actions_frame.place(relx=0.02, rely=0.98, anchor='sw')
         btn_style = {'font': ('Arial', 10, 'bold'), 'bg': '#D3D3D3', 'fg': 'black', 'width': 8}
         self.fold_btn = tk.Button(actions_frame, text="Fold", command=self.fold_action, **btn_style, state=tk.DISABLED)
-        self.fold_btn.pack(side=tk.LEFT, padx=5, pady=5)
         self.check_btn = tk.Button(actions_frame, text="Check", command=self.check_action, **btn_style, state=tk.DISABLED)
-        self.check_btn.pack(side=tk.LEFT, padx=5, pady=5)
         self.call_btn = tk.Button(actions_frame, text="Call", command=self.call_action, **btn_style, state=tk.DISABLED)
-        self.call_btn.pack(side=tk.LEFT, padx=5, pady=5)
         self.raise_btn = tk.Button(actions_frame, text="Raise", command=self.raise_action, **btn_style, state=tk.DISABLED)
-        self.raise_btn.pack(side=tk.LEFT, padx=5, pady=5)
         self.all_in_btn = tk.Button(actions_frame, text="All In", command=self.all_in_action, **btn_style, state=tk.DISABLED)
-        self.all_in_btn.pack(side=tk.LEFT, padx=5, pady=5)
-
-        # 4. Area Pemain Sendiri (Kanan Bawah)
+        for btn in [self.fold_btn, self.check_btn, self.call_btn, self.raise_btn, self.all_in_btn]:
+            btn.pack(side=tk.LEFT, padx=5, pady=5)
         my_player_area_frame = tk.Frame(self.root, bg='#111111', bd=1, relief=tk.SOLID)
         my_player_area_frame.place(relx=0.98, rely=0.98, anchor='se')
-        
         my_info_frame = tk.Frame(my_player_area_frame, bg='#111111')
         my_info_frame.pack(pady=5, padx=10, anchor='w')
-        
         self.my_name_label = tk.Label(my_info_frame, text="Player:", bg='#111111', fg='white', font=('Arial', 12, 'bold'))
-        self.my_name_label.pack(anchor='w')
         self.my_chips_label = tk.Label(my_info_frame, text="Chips: $0", bg='#111111', fg='white', font=('Arial', 11))
-        self.my_chips_label.pack(anchor='w')
-        self.my_bet_label = tk.Label(my_info_frame, text="Current Bet: $0", bg='#111111', fg='yellow', font=('Arial', 11))
-        self.my_bet_label.pack(anchor='w')
-
+        self.my_bet_label = tk.Label(my_info_frame, text="Bet: $0", bg='#111111', fg='yellow', font=('Arial', 11))
+        for label in [self.my_name_label, self.my_chips_label, self.my_bet_label]: label.pack(anchor='w')
         self.my_cards_display_frame = tk.Frame(my_player_area_frame, bg='#111111')
         self.my_cards_display_frame.pack(pady=5, padx=10, anchor='w')
-
-        # 5. Area Musuh (Kiri Atas) - POINT 2
         self.opponents_display_frame = tk.Frame(self.root, bg="black")
-        self.opponents_display_frame.place(relx=0.02, rely=0.02, anchor='nw') # Pindah ke kiri atas
+        self.opponents_display_frame.place(relx=0.02, rely=0.02, anchor='nw')
+        self.start_btn = tk.Button(self.root, text="Start New Hand", command=self.start_game, bg='#27AE60', fg='white', font=('Arial', 14, 'bold'))
 
-        # Tombol Start
-        self.start_btn = tk.Button(self.root, text="Start New Hand", command=self.start_game, bg='#27AE60', fg='white', font=('Arial', 14, 'bold'), padx=20, pady=10)
-    
     def connect_to_server(self, server_ip, port=8888):
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((server_ip, port))
             self.connected = True
+            threading.Thread(target=self.listen_to_server, daemon=True).start()
             join_message = {'type': 'join', 'player_id': self.player_id, 'name': self.player_name}
             self.socket.send(json.dumps(join_message).encode('utf-8') + b'\n')
-            listen_thread = threading.Thread(target=self.listen_to_server)
-            listen_thread.daemon = True
-            listen_thread.start()
             return True
         except Exception as e:
             print(f"Connection error: {e}")
@@ -199,211 +215,141 @@ class PokerClient:
                 while '\n' in buffer:
                     message_str, buffer = buffer.split('\n', 1)
                     if message_str.strip():
-                        try:
-                            message = json.loads(message_str)
-                            self.root.after(0, lambda m=message: self.handle_server_message(m))
-                        except json.JSONDecodeError:
-                            print(f"Invalid JSON received: {message_str}")
-            except Exception as e:
-                print(f"Listen error: {e}")
-                break
+                        self.root.after(0, self.handle_server_message, json.loads(message_str))
+            except Exception: break
         self.connected = False
-        self.root.after(0, lambda: messagebox.showinfo("Disconnected", "Lost connection to server."))
         self.root.after(0, self.root.quit)
         
     def handle_server_message(self, message):
         msg_type = message.get('type')
         if msg_type == 'join_success':
             self.my_name_label.config(text=f"Player: {self.player_name}")
-        elif msg_type == 'join_failed':
-            messagebox.showerror("Error", message.get('message'))
-            self.root.quit()
         elif msg_type == 'game_update':
             self.update_game_state(message.get('data'))
-        elif msg_type == 'action_failed':
-            messagebox.showwarning("Action Failed", message.get('message'))
         elif msg_type == 'game_result':
             winners = message.get('winners', [])
-            winning_hand_type = message.get('winning_hand_type', 'Unknown Hand')
-            if 'players' in self.game_data:
-                winner_names = [self.game_data['players'][pid]['name'] for pid in winners if pid in self.game_data['players']]
-                display_message = message.get('message')
-                if self.player_id in winners:
-                    display_message += f"\n\nYou won with a {winning_hand_type}!"
-                elif winner_names:
-                    display_message += f"\n\n{winner_names[0]} won with a {winning_hand_type}!"
-                messagebox.showinfo("Game Result", display_message)
-        elif msg_type == 'error':
-            messagebox.showerror("Server Error", message.get('message'))
-    
+            winner_names = [self.game_data['players'][pid]['name'] for pid in winners if pid in self.game_data.get('players', {})]
+            display_message = message.get('message', 'Game Over')
+            if winner_names:
+                display_message += f"\nHand: {message.get('winning_hand_type')}"
+            messagebox.showinfo("Game Result", display_message)
+
     def update_game_state(self, game_data):
         if not game_data: return
         self.game_data = game_data
-        self.current_player_id = game_data.get('current_player_id')
-        self.dealer_player_id = game_data.get('dealer_player_id')
-        self.pot_label.config(text=f"Pot: ${game_data.get('pot', 0)}")
         
-        game_state = game_data.get('game_state', 'waiting')
-        state_text = game_state.replace('_', ' ').title()
-        if self.current_player_id == self.player_id:
+        self.pot_label.config(text=f"Pot: ${game_data.get('pot', 0)}")
+        state_text = game_data.get('game_state', 'waiting').replace('_', ' ').title()
+        if game_data.get('current_player_id') == self.player_id:
             state_text += " - Your Turn!"
-        elif self.current_player_id and self.current_player_id in self.game_data.get('players', {}):
-            state_text += f" - {self.game_data['players'][self.current_player_id]['name']}'s Turn"
         self.game_state_label.config(text=state_text)
         
         self.update_community_cards(game_data.get('community_cards', []))
         self.update_players(game_data.get('players', {}))
-        self.update_action_buttons(self.current_player_id == self.player_id and game_state in ['pre_flop', 'flop', 'turn', 'river'])
         
-        if game_state == 'waiting' or game_state == 'game_over':
+        is_my_turn = game_data.get('current_player_id') == self.player_id
+        game_is_active = game_data.get('game_state') in ['pre_flop', 'flop', 'turn', 'river']
+        self.update_action_buttons(is_my_turn and game_is_active)
+        
+        if game_data.get('game_state') in ['waiting', 'game_over']:
             self.start_btn.place(relx=0.5, rely=0.6, anchor='center')
         else:
             self.start_btn.place_forget()
             
     def update_community_cards(self, cards):
-        for widget in self.community_cards_frame.winfo_children():
-            widget.destroy()
+        for widget in self.community_cards_frame.winfo_children(): widget.destroy()
         for card_data in cards:
-            card_image = self.card_images.get(card_data['image'])
-            if card_image:
-                tk.Label(self.community_cards_frame, image=card_image, bg='black').pack(side=tk.LEFT, padx=2)
+            img = self.card_images.get(card_data['image'])
+            if img: tk.Label(self.community_cards_frame, image=img, bg='black').pack(side=tk.LEFT, padx=3)
         for _ in range(len(cards), 5):
-            if self.card_back_image:
-                tk.Label(self.community_cards_frame, image=self.card_back_image, bg='black').pack(side=tk.LEFT, padx=2)
+            if self.card_back_image: tk.Label(self.community_cards_frame, image=self.card_back_image, bg='black').pack(side=tk.LEFT, padx=3)
     
     def update_players(self, players_data):
-        # Update info pemain sendiri
         if self.player_id in players_data:
             my_data = players_data[self.player_id]
             self.my_chips_label.config(text=f"Chips: ${my_data.get('chips', 0)}")
-            self.my_bet_label.config(text=f"Current Bet: ${my_data.get('current_bet', 0)}")
-            self.update_my_cards(my_data.get('cards', []))
+            self.my_bet_label.config(text=f"Bet: ${my_data.get('current_bet', 0)}")
+            for widget in self.my_cards_display_frame.winfo_children(): widget.destroy()
+            for card_data in my_data.get('cards', []):
+                img = self.card_images.get(card_data['image'])
+                if img: tk.Label(self.my_cards_display_frame, image=img, bg='#111111').pack(side=tk.LEFT, padx=2)
         
-        # Hapus widget musuh lama dan buat yang baru
-        for widget in self.opponents_display_frame.winfo_children():
-            widget.destroy()
-
-        # Tampilkan musuh di kiri atas
+        for widget in self.opponents_display_frame.winfo_children(): widget.destroy()
         for pid, p_data in players_data.items():
-            if pid == self.player_id:
-                continue
-
-            # Frame untuk setiap musuh
-            opponent_frame = tk.Frame(self.opponents_display_frame, bg='#111111', bd=1, relief=tk.SOLID)
-            opponent_frame.pack(pady=4, padx=5, anchor='nw') # Sesuaikan anchor ke nw
-
-            # Info ringkas
-            name_text = p_data.get('name', 'Unknown')
-            if pid == self.dealer_player_id: name_text += " (D)"
-            tk.Label(opponent_frame, text=name_text, bg='#111111', fg='white', font=('Arial', 9, 'bold')).pack(anchor='w', padx=5)
-            tk.Label(opponent_frame, text=f"Chips: ${p_data.get('chips', 0)}", bg='#111111', fg='white', font=('Arial', 8)).pack(anchor='w', padx=5)
-            tk.Label(opponent_frame, text=f"Bet: ${p_data.get('current_bet', 0)}", bg='#111111', fg='yellow', font=('Arial', 8)).pack(anchor='w', padx=5)
-            
-            # Kartu musuh
-            cards_frame = tk.Frame(opponent_frame, bg='#111111')
+            if pid == self.player_id: continue
+            frame = tk.Frame(self.opponents_display_frame, bg='#111111', bd=1, relief=tk.SOLID)
+            frame.pack(pady=4, padx=5, anchor='nw')
+            name_text = p_data.get('name', '') + (" (D)" if pid == self.game_data.get('dealer_player_id') else "")
+            tk.Label(frame, text=name_text, bg='#111111', fg='white', font=('Arial', 9, 'bold')).pack(anchor='w', padx=5)
+            tk.Label(frame, text=f"Chips: ${p_data.get('chips',0)}", bg='#111111', fg='white', font=('Arial', 8)).pack(anchor='w', padx=5)
+            cards_frame = tk.Frame(frame, bg='#111111')
             cards_frame.pack(anchor='w', padx=5, pady=(2,5))
             for card_data in p_data.get('cards', []):
-                card_image = self.card_images.get(card_data['image'], self.card_back_image)
-                tk.Label(cards_frame, image=card_image, bg='#111111').pack(side=tk.LEFT, padx=1)
-    
-    def update_my_cards(self, cards):
-        for widget in self.my_cards_display_frame.winfo_children():
-            widget.destroy()
-        for card_data in cards:
-            card_image = self.card_images.get(card_data['image'])
-            if card_image:
-                tk.Label(self.my_cards_display_frame, image=card_image, bg='#111111').pack(side=tk.LEFT, padx=2)
-    
-    def update_action_buttons(self, is_my_turn):
+                img = self.card_images.get(card_data.get('image'))
+                if img: tk.Label(cards_frame, image=img, bg='#111111').pack(side=tk.LEFT)
+
+    def update_action_buttons(self, can_act):
         for btn in [self.fold_btn, self.check_btn, self.call_btn, self.raise_btn, self.all_in_btn]:
             btn.config(state=tk.DISABLED)
-
-        if not is_my_turn or not self.game_data: return
+        if not can_act: return
+        
         my_data = self.game_data.get('players', {}).get(self.player_id)
         if not my_data or my_data.get('is_folded') or my_data.get('is_all_in'): return
-        
+
         current_bet, my_bet, my_chips = self.game_data.get('current_bet', 0), my_data.get('current_bet', 0), my_data.get('chips', 0)
-        
         self.fold_btn.config(state=tk.NORMAL)
         if my_chips > 0: self.all_in_btn.config(state=tk.NORMAL)
         if current_bet > my_bet:
-            call_amount = current_bet - my_bet
-            self.call_btn.config(state=tk.NORMAL, text=f"Call ${call_amount}" if my_chips >= call_amount else f"All-in ${my_chips}")
+            self.call_btn.config(state=tk.NORMAL)
         else:
             self.check_btn.config(state=tk.NORMAL)
-            self.call_btn.config(text="Call")
         if my_chips > (current_bet - my_bet):
             self.raise_btn.config(state=tk.NORMAL)
 
     def send_action(self, action, amount=0):
         if not self.connected: return
-        message = {'type': 'action', 'player_id': self.player_id, 'action': action, 'amount': amount}
         try:
-            self.socket.send(json.dumps(message).encode('utf-8') + b'\n')
+            self.socket.send(json.dumps({'type': 'action', 'player_id': self.player_id, 'action': action, 'amount': amount}).encode('utf-8') + b'\n')
         except Exception as e:
-            print(f"Error sending action: {e}")
-            self.connected = False
-            self.root.after(0, self.root.quit)
-    
-    def fold_action(self): self.send_action('fold')
-    def check_action(self): self.send_action('check')
-    def all_in_action(self): self.send_action('all_in')
-    
-    def call_action(self):
-        my_data = self.game_data.get('players', {}).get(self.player_id)
-        current_bet = self.game_data.get('current_bet', 0)
-        if not my_data or not isinstance(current_bet, int): return
-        if my_data['chips'] <= (current_bet - my_data['current_bet']):
-            self.send_action('all_in')
-        else:
-            self.send_action('call')
-    
-    def raise_action(self):
-        my_data = self.game_data.get('players', {}).get(self.player_id)
-        if not my_data: return
-        
-        current_bet = self.game_data.get('current_bet', 0)
-        my_chips, my_current_bet = my_data.get('chips', 0), my_data.get('current_bet', 0)
-        min_raise_increment = self.game_data.get('big_blind', 20)
-        min_total_raise = current_bet + min_raise_increment
-        max_total_bet = my_chips + my_current_bet
-        min_raise_to_show = max(min_total_raise, my_current_bet + 1)
+            print(f"Send action error: {e}")
 
-        amount_str = simpledialog.askstring("Raise", f"Raise to (min ${min_raise_to_show}, max ${max_total_bet}):", parent=self.root)
-        if amount_str:
-            try:
-                amount = int(amount_str)
-                if min_raise_to_show <= amount <= max_total_bet:
-                    self.send_action('raise', amount)
-                else:
-                    messagebox.showerror("Invalid Raise", f"Amount must be between ${min_raise_to_show} and ${max_total_bet}.")
-            except ValueError:
-                messagebox.showerror("Invalid Input", "Please enter a valid number.")
+    def fold_action(self): 
+        self.play_button_sound()
+        self.send_action('fold')
+
+    def check_action(self):
+        self.play_button_sound()
+        self.send_action('check')
+
+    def all_in_action(self):
+        self.play_button_sound()
+        self.send_action('all_in')
+
+    def call_action(self): 
+        self.play_button_sound()
+        self.send_action('call')
+    
+    def raise_action(self): 
+        self.play_button_sound()
+        amount = simpledialog.askinteger("Raise", "Raise to:", parent=self.root)
+        if amount: self.send_action('raise', amount)
     
     def start_game(self):
-        """Send request to start a new game to the server."""
-        if not self.connected:
-            messagebox.showwarning("Not Connected", "You are not connected to the server.")
-            return
-        
-        message = {'type': 'start_game', 'player_id': self.player_id}
-        
+        self.play_button_sound()
+        if not self.connected: return
         try:
-            self.socket.send(json.dumps(message).encode('utf-8') + b'\n')
+            self.socket.send(json.dumps({'type': 'start_game', 'player_id': self.player_id}).encode('utf-8') + b'\n')
         except Exception as e:
-            print(f"Error starting game: {e}")
-            self.connected = False
-            self.root.after(0, lambda: messagebox.showerror("Connection Error", "Failed to send start game request."))
-            self.root.after(0, self.root.quit)
-    
+            print(f"Start game error: {e}")
+
     def run(self):
         try:
             self.root.mainloop()
         except KeyboardInterrupt:
             pass
         finally:
-            if self.connected and self.socket:
-                self.socket.close()
+            if self.connected: self.socket.close()
+            pygame.quit()
 
 if __name__ == '__main__':
     client = PokerClient()
