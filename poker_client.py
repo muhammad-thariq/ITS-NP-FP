@@ -47,12 +47,12 @@ class PokerClient:
             # POINT 1: Perbesar ukuran kartu
             new_size = (80, 112)
 
-            back_path = os.path.join(cards_folder, "card_back.jpg")
+            back_path = os.path.join(cards_folder, "back_design.jpg")
             if os.path.exists(back_path):
                 img = Image.open(back_path)
                 img = img.resize(new_size, Image.Resampling.LANCZOS) # Ukuran baru
                 self.card_back_image = ImageTk.PhotoImage(img)
-                self.card_images['card_back.jpg'] = self.card_back_image
+                self.card_images['back_design.jpg'] = self.card_back_image
             else:
                 print(f"Peringatan: {back_path} tidak ditemukan.")
             
@@ -80,17 +80,17 @@ class PokerClient:
         dialog.title("Connect to Poker Game")
         dialog.geometry("400x250")
         dialog.grab_set()
-        dialog.configure(bg='#0D4F3C')
+        dialog.configure(bg='#C70300')
         
         dialog.transient(self.root)
         dialog.protocol("WM_DELETE_WINDOW", lambda: self.root.quit())
         
-        tk.Label(dialog, text="Server IP:", bg='#0D4F3C', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
+        tk.Label(dialog, text="Server IP:", bg='#C70300', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
         ip_entry = tk.Entry(dialog, font=('Arial', 12))
         ip_entry.insert(0, "localhost")
         ip_entry.pack(pady=5)
         
-        tk.Label(dialog, text="Your Name:", bg='#0D4F3C', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
+        tk.Label(dialog, text="Your Name:", bg='#C70300', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
         name_entry = tk.Entry(dialog, font=('Arial', 12))
         name_entry.pack(pady=5)
         
@@ -108,7 +108,7 @@ class PokerClient:
             else:
                 messagebox.showerror("Error", "Failed to connect to server. Is the server running?", parent=dialog)
         
-        tk.Button(dialog, text="Connect", command=connect, bg='#4CAF50', fg='white', font=('Arial', 12), padx=20, pady=5).pack(pady=20)
+        tk.Button(dialog, text="Connect", command=connect, bg='#2C2C2C', fg='white', font=('Arial', 12), padx=20, pady=5).pack(pady=20)
         
     def setup_ui(self):
         """Setup the main game UI with a Persona 5 theme"""
