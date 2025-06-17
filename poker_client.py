@@ -22,19 +22,16 @@ class PokerClient:
         
         # Game state
         self.game_data = {}
-        self.my_cards = []
-        self.community_cards = []
-        self.current_player_id = None
-        self.dealer_player_id = None
         
         # Image, Audio, and UI state
         self.card_images = {}
         self.card_back_image = None
         self.original_bg_image = None
-        self._resize_job = None # ### PERUBAHAN: Variabel untuk debouncing ###
+        self._resize_job = None
 
         self.initialize_audio()
         self.load_card_images()
+        
         self.player_widgets = {}
         
         self.setup_ui()
@@ -43,45 +40,46 @@ class PokerClient:
         self.root.bind('<Configure>', self.on_window_resize)
 
     def initialize_audio(self):
+        """Mempersiapkan pygame mixer dan memuat file audio."""
         try:
             pygame.mixer.init()
             pygame.mixer.music.load("assets/background_music.mp3")
             pygame.mixer.music.set_volume(0.3)
-            self.button_sound = pygame.mixer.Sound("assets/button_click.wav")
-            self.button_sound.set_volume(0.6)
+            
+            # Memuat semua sound effects
+            self.button_sound = pygame.mixer.Sound("assets/button_click.mp3")
+            self.chip_sound = pygame.mixer.Sound("assets/chip_sound.mp3")
+            self.check_sound = pygame.mixer.Sound("assets/check_sound.mp3")
+            self.win_sound = pygame.mixer.Sound("assets/win_sound.mp3")
+            
             print("Audio berhasil diinisialisasi.")
         except Exception as e:
-            print(f"Tidak dapat memuat audio: {e}. Fitur audio tidak akan aktif.")
-            self.button_sound = None
+            print(f"Loading audio {e} failed. Audio will not be available.")
+            self.button_sound = self.chip_sound = self.check_sound = self.win_sound = None
 
-    def play_button_sound(self):
-        if self.button_sound:
-            self.button_sound.play()
-    
-    ### PERUBAHAN: Metode perform_resize baru ###
-    def perform_resize(self, event):
+    def play_sfx(self, sound_object):
+        """Memainkan sound effect jika ada."""
+        if sound_object:
+            sound_object.play()
+
+    def on_window_resize(self, event):
+        """Secara dinamis mengubah ukuran gambar latar belakang saat ukuran jendela berubah."""
+        if self._resize_job:
+            self.root.after_cancel(self._resize_job)
+        self._resize_job = self.root.after(200, self.perform_resize)
+
+    def perform_resize(self):
         """Fungsi yang benar-benar melakukan resize gambar. Dipanggil setelah jeda."""
         if not self.original_bg_image:
             return
-
         new_width = self.root.winfo_width()
         new_height = self.root.winfo_height()
-        
-        # Opsi lain jika masih terasa lambat: ganti LANCZOS dengan BILINEAR
-        # resized_img = self.original_bg_image.resize((new_width, new_height), Image.Resampling.BILINEAR)
         resized_img = self.original_bg_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        
         self.background_photo = ImageTk.PhotoImage(resized_img)
         self.bg_label.configure(image=self.background_photo)
 
-    ### PERUBAHAN: Metode on_window_resize sekarang melakukan debouncing ###
-    def on_window_resize(self, event):
-        """Menerima event resize dan menjadwalkan ulang job resize (debouncing)."""
-        if self._resize_job:
-            self.root.after_cancel(self._resize_job)
-        self._resize_job = self.root.after(200, lambda: self.perform_resize(event))
-
     def load_card_images(self):
+        """Memuat semua gambar kartu dari folder cards."""
         cards_folder = "assets/cards"
         if not os.path.exists(cards_folder):
             messagebox.showerror("Error", "Folder 'assets/cards' tidak ditemukan!")
@@ -93,9 +91,7 @@ class PokerClient:
             if os.path.exists(back_path):
                 img = Image.open(back_path).resize(new_size, Image.Resampling.LANCZOS)
                 self.card_back_image = ImageTk.PhotoImage(img)
-                self.card_images['card_back.jpg'] = self.card_back_image
-            else:
-                print(f"Peringatan: {back_path} tidak ditemukan.")
+                self.card_images['back_design.jpg'] = self.card_back_image
             
             suits = ['club', 'diamond', 'heart', 'spade']
             ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'jack', 'queen', 'king', 'ace']
@@ -111,21 +107,31 @@ class PokerClient:
             print(f"Error loading card images: {e}")
 
     def setup_connection_dialog(self):
+        """Menampilkan dialog koneksi dengan background kustom."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Connect to Poker Game")
         dialog.geometry("400x250")
+        dialog.resizable(False, False)
         dialog.grab_set()
-        dialog.configure(bg='#C70300')
         dialog.transient(self.root)
         dialog.protocol("WM_DELETE_WINDOW", lambda: self.root.quit())
-        
-        tk.Label(dialog, text="Server IP:", bg='#C70300', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
-        ip_entry = tk.Entry(dialog, font=('Arial', 12))
+
+        try:
+            bg_path = os.path.join("assets", "dialog_background.png")
+            img = Image.open(bg_path).resize((400, 250), Image.Resampling.LANCZOS)
+            dialog.bg_image = ImageTk.PhotoImage(img)
+            tk.Label(dialog, image=dialog.bg_image, borderwidth=0).place(x=0, y=0)
+        except Exception as e:
+            print(f"Gagal memuat background dialog: {e}")
+            dialog.configure(bg='#C70300')
+
+        tk.Label(dialog, text="Server IP:", bg='#6A0B0A', fg='white', font=('Arial', 12)).pack(pady=(20, 2))
+        ip_entry = tk.Entry(dialog, font=('Arial', 12), justify='center')
         ip_entry.insert(0, "localhost")
         ip_entry.pack(pady=5)
         
-        tk.Label(dialog, text="Your Name:", bg='#C70300', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
-        name_entry = tk.Entry(dialog, font=('Arial', 12))
+        tk.Label(dialog, text="Your Name:", bg='#6A0B0A', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
+        name_entry = tk.Entry(dialog, font=('Arial', 12), justify='center')
         name_entry.pack(pady=5)
         
         def connect():
@@ -146,8 +152,29 @@ class PokerClient:
                 messagebox.showerror("Error", "Failed to connect to server.", parent=dialog)
         
         tk.Button(dialog, text="Connect", command=connect, bg='#2C2C2C', fg='white', font=('Arial', 12), padx=20, pady=5).pack(pady=20)
+
+    def show_custom_winner_dialog(self, message):
+        """Menampilkan dialog pemenang dengan background kustom."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Game Result")
+        dialog.geometry("500x300")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.transient(self.root)
+
+        try:
+            bg_path = os.path.join("assets", "dialog_background.png")
+            img = Image.open(bg_path).resize((500, 300), Image.Resampling.LANCZOS)
+            dialog.bg_image = ImageTk.PhotoImage(img)
+            tk.Label(dialog, image=dialog.bg_image, borderwidth=0).place(x=0, y=0)
+        except Exception:
+            dialog.configure(bg='black')
         
+        tk.Label(dialog, text=message, font=('Arial', 14, 'bold'), fg='white', bg='#333333', justify='center', wraplength=450).pack(expand=True, pady=20, padx=20)
+        tk.Button(dialog, text="OK", command=dialog.destroy, font=('Arial', 12, 'bold'), width=10).pack(pady=(0, 20))
+
     def setup_ui(self):
+        """Mempersiapkan UI utama game."""
         try:
             bg_image_path = os.path.join("assets", "background.png")
             self.original_bg_image = Image.open(bg_image_path)
@@ -156,18 +183,18 @@ class PokerClient:
             self.bg_label = tk.Label(self.root, image=self.background_photo, borderwidth=0)
             self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
         except FileNotFoundError:
-            print("Peringatan: 'assets/background.png' tidak ditemukan.")
             self.root.configure(bg='black')
-            self.original_bg_image = None
 
         self.pot_label = tk.Label(self.root, text="Pot: $0", bg='#1C1C1C', fg='white', font=('Arial', 16, 'bold'))
         self.pot_label.place(relx=0.5, rely=0.05, anchor='center')
         self.game_state_label = tk.Label(self.root, text="Waiting...", bg='#1C1C1C', fg='white', font=('Arial', 12))
         self.game_state_label.place(relx=0.5, rely=0.1, anchor='center')
+        
         community_bg_frame = tk.Frame(self.root, bg='black', bd=2, relief=tk.SOLID)
         community_bg_frame.place(relx=0.5, rely=0.45, anchor='center')
         self.community_cards_frame = tk.Frame(community_bg_frame, bg='black')
         self.community_cards_frame.pack(expand=True, padx=5, pady=5)
+        
         actions_frame = tk.Frame(self.root, bg='black', bd=0)
         actions_frame.place(relx=0.02, rely=0.98, anchor='sw')
         btn_style = {'font': ('Arial', 10, 'bold'), 'bg': '#D3D3D3', 'fg': 'black', 'width': 8}
@@ -178,6 +205,7 @@ class PokerClient:
         self.all_in_btn = tk.Button(actions_frame, text="All In", command=self.all_in_action, **btn_style, state=tk.DISABLED)
         for btn in [self.fold_btn, self.check_btn, self.call_btn, self.raise_btn, self.all_in_btn]:
             btn.pack(side=tk.LEFT, padx=5, pady=5)
+
         my_player_area_frame = tk.Frame(self.root, bg='#111111', bd=1, relief=tk.SOLID)
         my_player_area_frame.place(relx=0.98, rely=0.98, anchor='se')
         my_info_frame = tk.Frame(my_player_area_frame, bg='#111111')
@@ -188,8 +216,10 @@ class PokerClient:
         for label in [self.my_name_label, self.my_chips_label, self.my_bet_label]: label.pack(anchor='w')
         self.my_cards_display_frame = tk.Frame(my_player_area_frame, bg='#111111')
         self.my_cards_display_frame.pack(pady=5, padx=10, anchor='w')
+
         self.opponents_display_frame = tk.Frame(self.root, bg="black")
         self.opponents_display_frame.place(relx=0.02, rely=0.02, anchor='nw')
+        
         self.start_btn = tk.Button(self.root, text="Start New Hand", command=self.start_game, bg='#27AE60', fg='white', font=('Arial', 14, 'bold'))
 
     def connect_to_server(self, server_ip, port=8888):
@@ -228,11 +258,20 @@ class PokerClient:
             self.update_game_state(message.get('data'))
         elif msg_type == 'game_result':
             winners = message.get('winners', [])
+            if self.player_id in winners:
+                self.play_sfx(self.win_sound)
+            
             winner_names = [self.game_data['players'][pid]['name'] for pid in winners if pid in self.game_data.get('players', {})]
             display_message = message.get('message', 'Game Over')
             if winner_names:
                 display_message += f"\nHand: {message.get('winning_hand_type')}"
-            messagebox.showinfo("Game Result", display_message)
+            
+            self.show_custom_winner_dialog(display_message)
+        elif msg_type == 'action_failed':
+             messagebox.showwarning("Action Failed", message.get('message'))
+        elif msg_type == 'error':
+            messagebox.showerror("Server Error", message.get('message'))
+
 
     def update_game_state(self, game_data):
         if not game_data: return
@@ -314,28 +353,28 @@ class PokerClient:
             print(f"Send action error: {e}")
 
     def fold_action(self): 
-        self.play_button_sound()
+        self.play_sfx(self.button_sound)
         self.send_action('fold')
 
     def check_action(self):
-        self.play_button_sound()
+        self.play_sfx(self.check_sound)
         self.send_action('check')
 
     def all_in_action(self):
-        self.play_button_sound()
+        self.play_sfx(self.chip_sound)
         self.send_action('all_in')
 
     def call_action(self): 
-        self.play_button_sound()
+        self.play_sfx(self.chip_sound)
         self.send_action('call')
     
     def raise_action(self): 
-        self.play_button_sound()
+        self.play_sfx(self.chip_sound)
         amount = simpledialog.askinteger("Raise", "Raise to:", parent=self.root)
         if amount: self.send_action('raise', amount)
     
     def start_game(self):
-        self.play_button_sound()
+        self.play_sfx(self.button_sound)
         if not self.connected: return
         try:
             self.socket.send(json.dumps({'type': 'start_game', 'player_id': self.player_id}).encode('utf-8') + b'\n')
