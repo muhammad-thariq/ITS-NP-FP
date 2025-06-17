@@ -1,18 +1,100 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+import pygame
 import socket
 import threading
 import json
 import uuid
 import os
-from PIL import Image, ImageTk
+import sys
+
+# --- Pygame UI Helper Classes ---
+
+class InputBox:
+    """A simple input box component for Pygame."""
+    def __init__(self, x, y, w, h, font, text=''):
+        self.rect = pygame.Rect(x, y, w, h)
+        self.color_inactive = pygame.Color('#444444')
+        self.color_active = pygame.Color('white')
+        self.color = self.color_inactive
+        self.text = text
+        self.font = font
+        self.txt_surface = self.font.render(text, True, self.color)
+        self.active = False
+
+    def handle_event(self, event):
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if self.rect.collidepoint(event.pos):
+                self.active = not self.active
+            else:
+                self.active = False
+            self.color = self.color_active if self.active else self.color_inactive
+        if event.type == pygame.KEYDOWN:
+            if self.active:
+                if event.key == pygame.K_RETURN:
+                    # Optional: handle enter key press
+                    pass
+                elif event.key == pygame.K_BACKSPACE:
+                    self.text = self.text[:-1]
+                else:
+                    self.text += event.unicode
+                self.txt_surface = self.font.render(self.text, True, 'white')
+
+    def draw(self, screen):
+        pygame.draw.rect(screen, self.color, self.rect, 2)
+        screen.blit(self.txt_surface, (self.rect.x + 5, self.rect.y + 5))
+        self.rect.w = max(200, self.txt_surface.get_width() + 10)
+
+
+class Button:
+    """A simple button component for Pygame."""
+    def __init__(self, x, y, w, h, text, font, color, hover_color, callback, enabled=True):
+        self.rect = pygame.Rect(x, y, w, h)
+        self.text = text
+        self.font = font
+        self.color = color
+        self.hover_color = hover_color
+        self.callback = callback
+        self.enabled = enabled
+        self.is_hovered = False
+
+    def handle_event(self, event):
+        if not self.enabled:
+            return
+        if event.type == pygame.MOUSEMOTION:
+            self.is_hovered = self.rect.collidepoint(event.pos)
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if self.is_hovered:
+                self.callback()
+
+    def draw(self, screen):
+        if self.enabled:
+            current_color = self.hover_color if self.is_hovered else self.color
+            pygame.draw.rect(screen, current_color, self.rect, border_radius=8)
+            text_surf = self.font.render(self.text, True, pygame.Color('white'))
+        else:
+            pygame.draw.rect(screen, pygame.Color('gray'), self.rect, border_radius=8)
+            text_surf = self.font.render(self.text, True, pygame.Color('lightgray'))
+
+        text_rect = text_surf.get_rect(center=self.rect.center)
+        screen.blit(text_surf, text_rect)
+
+# --- Main Poker Client Class ---
 
 class PokerClient:
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Texas Hold'em Poker")
-        self.root.geometry("1200x800")
-        self.root.configure(bg='#0D4F3C')  # Poker table green
+        # Pygame setup
+        pygame.init()
+        self.screen_width = 1200
+        self.screen_height = 800
+        self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
+        pygame.display.set_caption("Texas Hold'em Poker")
+        self.clock = pygame.time.Clock()
+        self.font_sm = pygame.font.SysFont('Arial', 18)
+        self.font_md = pygame.font.SysFont('Arial', 24)
+        self.font_lg = pygame.font.SysFont('Arial', 32, bold=True)
+        self.bg_color = pygame.Color('#0D4F3C')
+
+        # Custom event for server messages
+        self.SERVER_MESSAGE_EVENT = pygame.USEREVENT + 1
         
         # Network settings
         self.socket = None
@@ -22,640 +104,361 @@ class PokerClient:
         
         # Game state
         self.game_data = {}
-        self.my_cards = []
-        self.community_cards = []
-        self.current_player_id = None # To explicitly track whose turn it is
-        self.dealer_player_id = None # To explicitly track the dealer
-        
+        self.current_player_id = None
+        self.dealer_player_id = None
+        self.scene = 'connecting' # Manages which screen to show: 'connecting' or 'game'
+
         # Card images
         self.card_images = {}
         self.card_back_image = None
         self.load_card_images()
         
-        self.player_widgets = {} # To store references to player UI elements
-        
-        self.setup_ui()
-        self.setup_connection_dialog()
-        
+        # UI Elements
+        self.buttons = {}
+        self.setup_ui_elements()
+
     def load_card_images(self):
-        """Load all card images from the cards folder"""
+        """Load all card images using Pygame."""
         cards_folder = "cards"
         if not os.path.exists(cards_folder):
-            messagebox.showerror("Error", "Cards folder not found! Please create a 'cards' folder with card images (e.g., heart_ace.jpg, back_design.jpg).")
-            return
-        
+            print("Error: 'cards' folder not found!")
+            sys.exit()
+
         try:
-            # Load card back - changed to back_design.jpg
             back_path = os.path.join(cards_folder, "back_design.jpg")
-            if os.path.exists(back_path):
-                img = Image.open(back_path)
-                img = img.resize((60, 84), Image.Resampling.LANCZOS)
-                self.card_back_image = ImageTk.PhotoImage(img)
-            else:
-                print(f"Warning: {back_path} not found. Using placeholder if available.")
-            
-            # Load all card faces
+            img = pygame.image.load(back_path).convert()
+            self.card_back_image = pygame.transform.scale(img, (75, 105))
+
             suits = ['club', 'diamond', 'heart', 'spade']
             ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'jack', 'queen', 'king', 'ace']
-            
             for suit in suits:
                 for rank in ranks:
                     filename = f"{suit}_{rank}.jpg"
                     filepath = os.path.join(cards_folder, filename)
                     if os.path.exists(filepath):
-                        img = Image.open(filepath)
-                        img = img.resize((60, 84), Image.Resampling.LANCZOS)
-                        self.card_images[filename] = ImageTk.PhotoImage(img)
+                        img = pygame.image.load(filepath).convert()
+                        self.card_images[filename] = pygame.transform.scale(img, (75, 105))
                     else:
-                        print(f"Warning: {filepath} not found.")
-                        
+                        print(f"Warning: Card image not found: {filename}")
         except Exception as e:
             print(f"Error loading card images: {e}")
-            messagebox.showwarning("Warning", "Some card images could not be loaded. Please ensure 'cards' folder contains all necessary .jpg files.")
-    
-    def setup_connection_dialog(self):
-        """Show connection dialog at startup"""
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Connect to Poker Game")
-        dialog.geometry("400x250")
-        dialog.grab_set() # Make this dialog modal
-        dialog.configure(bg='#0D4F3C')
-        
-        # Center the dialog
-        dialog.transient(self.root)
-        dialog.protocol("WM_DELETE_WINDOW", lambda: self.root.quit()) # Exit application if dialog is closed
-        
-        # Server IP
-        tk.Label(dialog, text="Server IP:", bg='#0D4F3C', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
-        ip_entry = tk.Entry(dialog, font=('Arial', 12))
-        ip_entry.insert(0, "localhost")  # Default IP
-        ip_entry.pack(pady=5)
-        
-        # Player name
-        tk.Label(dialog, text="Your Name:", bg='#0D4F3C', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
-        name_entry = tk.Entry(dialog, font=('Arial', 12))
-        name_entry.pack(pady=5)
-        
-        def connect():
-            server_ip = ip_entry.get().strip()
-            name = name_entry.get().strip()
-            
-            if not server_ip or not name:
-                messagebox.showerror("Error", "Please fill in all fields", parent=dialog)
-                return
-            
-            self.player_name = name
-            if self.connect_to_server(server_ip):
-                dialog.destroy() # Close dialog on successful connection
-            else:
-                messagebox.showerror("Error", "Failed to connect to server. Is the server running?", parent=dialog)
-        
-        tk.Button(dialog, text="Connect", command=connect, 
-                  bg='#4CAF50', fg='white', font=('Arial', 12), 
-                  padx=20, pady=5).pack(pady=20)
-        
-    def setup_ui(self):
-        """Setup the main game UI"""
-        # Main frame
-        main_frame = tk.Frame(self.root, bg='#0D4F3C')
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Top info panel
-        info_frame = tk.Frame(main_frame, bg='#1A5D4A', relief=tk.RAISED, bd=2)
-        info_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        self.pot_label = tk.Label(info_frame, text="Pot: $0", 
-                                  bg='#1A5D4A', fg='white', font=('Arial', 16, 'bold'))
-        self.pot_label.pack(side=tk.LEFT, padx=10, pady=5)
-        
-        self.game_state_label = tk.Label(info_frame, text="Waiting for players...", 
-                                         bg='#1A5D4A', fg='white', font=('Arial', 12))
-        self.game_state_label.pack(side=tk.RIGHT, padx=10, pady=5)
-        
-        # Community cards area
-        community_frame = tk.Frame(main_frame, bg='#0D4F3C')
-        community_frame.pack(pady=20)
-        
-        tk.Label(community_frame, text="Community Cards", 
-                 bg='#0D4F3C', fg='white', font=('Arial', 14, 'bold')).pack()
-        
-        self.community_cards_frame = tk.Frame(community_frame, bg='#0D4F3C')
-        self.community_cards_frame.pack(pady=10)
-        
-        # Players area
-        players_frame = tk.Frame(main_frame, bg='#0D4F3C')
-        players_frame.pack(fill=tk.BOTH, expand=True, pady=10)
-        
-        # Other players (top) - use a grid for better arrangement
-        self.other_players_frame = tk.Frame(players_frame, bg='#0D4F3C')
-        self.other_players_frame.pack(fill=tk.X, pady=(0, 20))
-        
-        # My player area (bottom)
-        my_player_frame = tk.Frame(players_frame, bg='#1A5D4A', relief=tk.RAISED, bd=2)
-        my_player_frame.pack(fill=tk.X, side=tk.BOTTOM)
-        
-        # My cards
-        my_cards_frame = tk.Frame(my_player_frame, bg='#1A5D4A')
-        my_cards_frame.pack(side=tk.LEFT, padx=10, pady=10)
-        
-        tk.Label(my_cards_frame, text="Your Cards", 
-                 bg='#1A5D4A', fg='white', font=('Arial', 12, 'bold')).pack()
-        
-        self.my_cards_display_frame = tk.Frame(my_cards_frame, bg='#1A5D4A')
-        self.my_cards_display_frame.pack()
-        
-        # My info
-        my_info_frame = tk.Frame(my_player_frame, bg='#1A5D4A')
-        my_info_frame.pack(side=tk.LEFT, padx=20, pady=10)
-        
-        self.my_name_label = tk.Label(my_info_frame, text=f"Player: {self.player_name}", 
-                                      bg='#1A5D4A', fg='white', font=('Arial', 12, 'bold'))
-        self.my_name_label.pack()
-        
-        self.my_chips_label = tk.Label(my_info_frame, text="Chips: $0", 
-                                       bg='#1A5D4A', fg='white', font=('Arial', 11))
-        self.my_chips_label.pack()
-        
-        self.my_bet_label = tk.Label(my_info_frame, text="Current Bet: $0", 
-                                     bg='#1A5D4A', fg='white', font=('Arial', 11))
-        self.my_bet_label.pack()
-        
-        # Action buttons
-        actions_frame = tk.Frame(my_player_frame, bg='#1A5D4A')
-        actions_frame.pack(side=tk.RIGHT, padx=10, pady=10)
-        
-        self.fold_btn = tk.Button(actions_frame, text="Fold", command=self.fold_action,
-                                  bg='#FF6B6B', fg='white', font=('Arial', 10), 
-                                  padx=15, pady=5, state=tk.DISABLED)
-        self.fold_btn.pack(side=tk.LEFT, padx=2)
-        
-        self.check_btn = tk.Button(actions_frame, text="Check", command=self.check_action,
-                                   bg='#4ECDC4', fg='white', font=('Arial', 10), 
-                                   padx=15, pady=5, state=tk.DISABLED)
-        self.check_btn.pack(side=tk.LEFT, padx=2)
-        
-        self.call_btn = tk.Button(actions_frame, text="Call", command=self.call_action,
-                                  bg='#45B7D1', fg='white', font=('Arial', 10), 
-                                  padx=15, pady=5, state=tk.DISABLED)
-        self.call_btn.pack(side=tk.LEFT, padx=2)
-        
-        self.raise_btn = tk.Button(actions_frame, text="Raise", command=self.raise_action,
-                                   bg='#FFA07A', fg='white', font=('Arial', 10), 
-                                   padx=15, pady=5, state=tk.DISABLED)
-        self.raise_btn.pack(side=tk.LEFT, padx=2)
-        
-        self.all_in_btn = tk.Button(actions_frame, text="All In", command=self.all_in_action,
-                                   bg='#9B59B6', fg='white', font=('Arial', 10), 
-                                   padx=15, pady=5, state=tk.DISABLED)
-        self.all_in_btn.pack(side=tk.LEFT, padx=2)
-        
-        # Start/New Hand button
-        self.start_btn = tk.Button(my_player_frame, text="Start New Hand", 
-                                  command=self.start_game,
-                                  bg='#27AE60', fg='white', font=('Arial', 12, 'bold'), 
-                                  padx=20, pady=8)
-        self.start_btn.pack(side=tk.RIGHT, padx=10, pady=10)
-    
+            sys.exit()
+
+    def setup_ui_elements(self):
+        """Initialize UI elements like buttons and input boxes."""
+        # Connection Screen
+        self.ip_input = InputBox(450, 280, 300, 40, self.font_md, "localhost")
+        self.name_input = InputBox(450, 380, 300, 40, self.font_md)
+        self.connect_button = Button(500, 480, 200, 50, "Connect", self.font_md, '#4CAF50', '#66BB6A', self.attempt_connection)
+
+        # Game Screen Buttons
+        actions_y = self.screen_height - 60
+        self.buttons['fold'] = Button(550, actions_y, 100, 40, "Fold", self.font_md, '#FF6B6B', '#FF8E8E', self.fold_action, False)
+        self.buttons['check'] = Button(660, actions_y, 100, 40, "Check", self.font_md, '#4ECDC4', '#70E0DA', self.check_action, False)
+        self.buttons['call'] = Button(770, actions_y, 100, 40, "Call", self.font_md, '#45B7D1', '#68C8E0', self.call_action, False)
+        self.buttons['raise'] = Button(880, actions_y, 100, 40, "Raise", self.font_md, '#FFA07A', '#FFB799', self.raise_action, False)
+        self.buttons['all_in'] = Button(990, actions_y, 100, 40, "All In", self.font_md, '#9B59B6', '#B17ACC', self.all_in_action, False)
+        self.buttons['start'] = Button(10, self.screen_height - 60, 200, 40, "Start New Hand", self.font_md, '#27AE60', '#48C97A', self.start_game, True)
+        self.raise_input_active = False # Flag to show raise input
+        self.raise_input_box = InputBox(self.screen_width // 2 - 100, self.screen_height // 2 - 20, 200, 40, self.font_md)
+        self.confirm_raise_button = Button(self.screen_width // 2 - 50, self.screen_height // 2 + 40, 100, 40, "Confirm", self.font_md, '#4CAF50', '#66BB6A', self.confirm_raise)
+
+
     def connect_to_server(self, server_ip, port=8888):
-        """Connect to the poker server"""
+        """Connect to the poker server."""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((server_ip, port))
             self.connected = True
             
-            # Send join message immediately after connecting
-            join_message = {
-                'type': 'join',
-                'player_id': self.player_id,
-                'name': self.player_name
-            }
-            self.socket.send(json.dumps(join_message).encode('utf-8') + b'\n') # Add newline for server parsing
+            join_message = {'type': 'join', 'player_id': self.player_id, 'name': self.player_name}
+            self.socket.send(json.dumps(join_message).encode('utf-8') + b'\n')
             
-            # Start listening thread
-            listen_thread = threading.Thread(target=self.listen_to_server)
-            listen_thread.daemon = True # Allow the main program to exit even if this thread is running
-            listen_thread.start()
-            
+            threading.Thread(target=self.listen_to_server, daemon=True).start()
+            self.scene = 'game' # Switch to game scene on success
             return True
         except Exception as e:
             print(f"Connection error: {e}")
             return False
-    
+            
+    def attempt_connection(self):
+        """Callback for the connect button."""
+        server_ip = self.ip_input.text.strip()
+        name = self.name_input.text.strip()
+        if not server_ip or not name:
+            print("Error: Please fill in all fields.")
+            return
+        self.player_name = name
+        self.connect_to_server(server_ip)
+
     def listen_to_server(self):
-        """Listen for messages from the server"""
+        """Listen for messages from the server in a separate thread."""
+        buffer = ""
         while self.connected:
             try:
                 data = self.socket.recv(4096).decode('utf-8')
                 if not data:
-                    break # Server disconnected
-                
-                # Handle potential partial messages (if multiple messages are sent in one packet)
-                messages = data.split('\n') # Assuming server sends newline after each JSON
-                for msg_str in messages:
-                    if msg_str.strip(): # Ensure it's not an empty string
-                        try:
-                            message = json.loads(msg_str)
-                            self.root.after(0, lambda m=message: self.handle_server_message(m))
-                        except json.JSONDecodeError:
-                            print(f"Invalid JSON received: {msg_str}")
-                
+                    break
+                buffer += data
+                while '\n' in buffer:
+                    msg_str, buffer = buffer.split('\n', 1)
+                    if msg_str.strip():
+                        message = json.loads(msg_str)
+                        # Post a custom event to the main thread's event queue
+                        pygame.event.post(pygame.event.Event(self.SERVER_MESSAGE_EVENT, {'message': message}))
             except Exception as e:
                 print(f"Listen error: {e}")
                 break
-        
         self.connected = False
-        self.root.after(0, lambda: messagebox.showinfo("Disconnected", "Lost connection to server. The game will now close."))
-        self.root.after(0, self.root.quit) # Close application on disconnect
-        
+        print("Disconnected from server.")
+
     def handle_server_message(self, message):
-        """Handle messages from the server"""
+        """Process messages from the server on the main thread."""
         msg_type = message.get('type')
-        
         if msg_type == 'join_success':
-            self.update_status("Connected to game!")
-            self.my_name_label.config(text=f"Player: {self.player_name}")
-            
+            print("Successfully joined the game.")
         elif msg_type == 'join_failed':
-            messagebox.showerror("Error", message.get('message'))
-            self.root.quit() # Exit if unable to join
-            
+            print(f"Failed to join: {message.get('message')}")
+            self.scene = 'connecting' # Revert to connection screen
         elif msg_type == 'game_update':
-            self.update_game_state(message.get('data'))
-            
-        elif msg_type == 'game_started':
-            self.update_status("Game started!")
-            
-        elif msg_type == 'action_failed':
-            messagebox.showwarning("Action Failed", message.get('message'))
-            
+            self.game_data = message.get('data', {})
+            self.update_ui_from_gamestate()
         elif msg_type == 'game_result':
-            winners = message.get('winners', [])
-            winning_hand_type = message.get('winning_hand_type', 'Unknown Hand') # Get the winning hand type
+            # This could be handled by drawing a popup message
+            print(f"Game Result: {message.get('message')}")
+        elif msg_type == 'action_failed' or msg_type == 'error':
+             print(f"Server message: {message.get('message')}")
+
+    def update_ui_from_gamestate(self):
+        """Update button states and other UI info based on new game data."""
+        if not self.game_data:
+            return
             
-            # Ensure game_data['players'] is populated before accessing
-            if 'players' in self.game_data:
-                winner_names = [self.game_data['players'][pid]['name'] for pid in winners if pid in self.game_data['players']]
-                
-                # Construct the message with the winning hand type
-                display_message = message.get('message', f"The winner(s) are: {', '.joiwinnern(winner_names)}!")
-                if self.player_id in winners:
-                    display_message += f"\n\nYou won with a {winning_hand_type}!"
+        self.current_player_id = self.game_data.get('current_player_id')
+        self.dealer_player_id = self.game_data.get('dealer_player_id')
+        game_state = self.game_data.get('game_state', 'waiting')
+
+        is_my_turn = (self.current_player_id == self.player_id and game_state in ['pre_flop', 'flop', 'turn', 'river'])
+        
+        # Disable all action buttons by default
+        for key in ['fold', 'check', 'call', 'raise', 'all_in']:
+            self.buttons[key].enabled = False
+
+        if is_my_turn:
+            my_data = self.game_data.get('players', {}).get(self.player_id)
+            if my_data and not my_data.get('is_folded') and not my_data.get('is_all_in'):
+                current_bet = self.game_data.get('current_bet', 0)
+                my_bet = my_data.get('current_bet', 0)
+                my_chips = my_data.get('chips', 0)
+
+                self.buttons['fold'].enabled = True
+                self.buttons['all_in'].enabled = my_chips > 0
+
+                if current_bet == my_bet:
+                    self.buttons['check'].enabled = True
+                    self.buttons['call'].text = "Call"
                 else:
-                    # If not the winner, show what the winner had
-                    if len(winners) == 1:
-                        display_message += f"\n\n{winner_names[0]} won with a {winning_hand_type}!"
+                    call_amount = current_bet - my_bet
+                    if my_chips >= call_amount:
+                        self.buttons['call'].enabled = True
+                        self.buttons['call'].text = f"Call ${call_amount}"
+                
+                # Simple raise logic: can raise if you have more chips than the call amount
+                if my_chips > (current_bet - my_bet):
+                    self.buttons['raise'].enabled = True
 
-                messagebox.showinfo("Game Result", display_message)
-                self.update_status(f"Winners: {', '.join(winner_names)} (Winning Hand: {winning_hand_type})")
-            else:
-                messagebox.showinfo("Game Result", message.get('message'))
-                self.update_status("Game ended.")
+        # Start button visibility
+        self.buttons['start'].enabled = (game_state in ['waiting', 'game_over'])
 
-        elif msg_type == 'error':
-            messagebox.showerror("Server Error", message.get('message'))
-    
-    def update_game_state(self, game_data):
-        """Update the UI with new game state"""
-        if not game_data:
-            return
-        
-        self.game_data = game_data
-        self.current_player_id = game_data.get('current_player_id')
-        self.dealer_player_id = game_data.get('dealer_player_id')
-        
-        # Update pot and game state label
-        self.pot_label.config(text=f"Pot: ${game_data.get('pot', 0)}")
-        
-        game_state = game_data.get('game_state', 'waiting')
-        state_text = {
-            'waiting': 'Waiting for players...',
-            'dealing': 'Dealing cards...',
-            'pre_flop': 'Pre-Flop',
-            'flop': 'Flop',
-            'turn': 'Turn',
-            'river': 'River',
-            'showdown': 'Showdown',
-            'game_over': 'Game Over'
-        }.get(game_state, game_state.title())
-        
-        if self.current_player_id == self.player_id:
-            state_text += " - Your Turn!"
-        elif self.current_player_id and self.current_player_id in self.game_data.get('players', {}):
-            current_player_name = self.game_data['players'][self.current_player_id]['name']
-            state_text += f" - {current_player_name}'s Turn"
-            
-        self.game_state_label.config(text=state_text)
-        
-        # Update community cards
-        self.update_community_cards(game_data.get('community_cards', []))
-        
-        # Update players
-        self.update_players(game_data.get('players', {}))
-        
-        # Update action buttons
-        self.update_action_buttons(self.current_player_id == self.player_id and game_state in ['pre_flop', 'flop', 'turn', 'river'])
-        
-        # Control Start New Hand button visibility
-        if game_state == 'waiting' or game_state == 'game_over':
-            self.start_btn.config(state=tk.NORMAL)
+    def run(self):
+        """Main game loop."""
+        running = True
+        while running:
+            # Event handling
+            events = pygame.event.get()
+            for event in events:
+                if event.type == pygame.QUIT:
+                    running = False
+                
+                if self.scene == 'connecting':
+                    self.ip_input.handle_event(event)
+                    self.name_input.handle_event(event)
+                    self.connect_button.handle_event(event)
+                
+                elif self.scene == 'game':
+                    if self.raise_input_active:
+                        self.raise_input_box.handle_event(event)
+                        self.confirm_raise_button.handle_event(event)
+                    else:
+                        for button in self.buttons.values():
+                            button.handle_event(event)
+
+                if event.type == self.SERVER_MESSAGE_EVENT:
+                    self.handle_server_message(event.message)
+
+            # Drawing
+            self.screen.fill(self.bg_color)
+            if self.scene == 'connecting':
+                self.draw_connection_screen()
+            elif self.scene == 'game':
+                self.draw_game_screen()
+                if self.raise_input_active:
+                    self.draw_raise_dialog()
+
+            pygame.display.flip()
+            self.clock.tick(30) # Limit frame rate to 30 FPS
+
+        # Cleanup
+        if self.socket:
+            self.socket.close()
+        pygame.quit()
+        sys.exit()
+
+    # --- Drawing Methods ---
+    def draw_text(self, text, font, color, x, y, center=False):
+        """Helper to draw text on screen."""
+        text_surface = font.render(str(text), True, color)
+        text_rect = text_surface.get_rect()
+        if center:
+            text_rect.center = (x, y)
         else:
-            self.start_btn.config(state=tk.DISABLED)
-            
-    def update_community_cards(self, cards):
-        """Update community cards display"""
-        for widget in self.community_cards_frame.winfo_children():
-            widget.destroy()
+            text_rect.topleft = (x, y)
+        self.screen.blit(text_surface, text_rect)
+
+    def draw_connection_screen(self):
+        self.draw_text("Texas Hold'em Poker", self.font_lg, 'white', self.screen_width / 2, 100, center=True)
+        self.draw_text("Server IP:", self.font_md, 'white', self.screen_width / 2, 250, center=True)
+        self.ip_input.draw(self.screen)
+        self.draw_text("Your Name:", self.font_md, 'white', self.screen_width / 2, 350, center=True)
+        self.name_input.draw(self.screen)
+        self.connect_button.draw(self.screen)
+
+    def draw_game_screen(self):
+        """Draws the main poker table UI."""
+        # Draw Pot and Game State
+        pot = self.game_data.get('pot', 0)
+        self.draw_text(f"Pot: ${pot}", self.font_lg, 'yellow', self.screen_width / 2, 20, center=True)
         
-        for card_data in cards:
-            card_image = self.card_images.get(card_data['image'])
-            if card_image:
-                label = tk.Label(self.community_cards_frame, image=card_image, bg='#0D4F3C')
-                label.pack(side=tk.LEFT, padx=2)
-            
-        # Add placeholders for remaining community cards if fewer than 5
-        for i in range(len(cards), 5):
-            if self.card_back_image:
-                label = tk.Label(self.community_cards_frame, image=self.card_back_image, bg='#0D4F3C')
-                label.pack(side=tk.LEFT, padx=2)
-    
-    def update_players(self, players_data):
-        """Update players display"""
-        # Clear existing player widgets (except my own)
-        for widget in self.other_players_frame.winfo_children():
-            widget.destroy()
-        self.player_widgets.clear() # Clear stored widgets as well
+        game_state_str = self.game_data.get('game_state', 'Waiting').replace('_', ' ').title()
+        if self.current_player_id and self.current_player_id == self.player_id:
+            game_state_str += " - Your Turn!"
+        self.draw_text(game_state_str, self.font_md, 'white', self.screen_width / 2, 60, center=True)
 
-        # Update my player info and cards
-        if self.player_id in players_data:
-            my_data = players_data[self.player_id]
-            self.my_chips_label.config(text=f"Chips: ${my_data.get('chips', 0)}")
-            self.my_bet_label.config(text=f"Current Bet: ${my_data.get('current_bet', 0)}")
-            self.update_my_cards(my_data.get('cards', []))
-        
-        # Display other players
-        player_keys_ordered = list(players_data.keys())
-        if self.player_id in player_keys_ordered:
-            my_index = player_keys_ordered.index(self.player_id)
-            # Sort players so 'my' player is at the bottom, and others are arranged around the top
-            # Simple sorting for display: put current player's ID first, then others
-            sorted_pids = [self.player_id] + [pid for pid in player_keys_ordered if pid != self.player_id]
-            
-            # For displaying other players, skip my own ID
-            for pid in sorted_pids:
-                if pid == self.player_id:
-                    continue 
+        # Draw Community Cards
+        community_cards = self.game_data.get('community_cards', [])
+        start_x = (self.screen_width - len(community_cards) * 85) / 2
+        for i, card in enumerate(community_cards):
+            img = self.card_images.get(card['image'])
+            if img:
+                self.screen.blit(img, (start_x + i * 85, 200))
 
-                player_data = players_data[pid]
-                player_frame = tk.Frame(self.other_players_frame, bg='#2E7D32', relief=tk.RAISED, bd=1)
-                player_frame.pack(side=tk.LEFT, padx=5, pady=5, fill=tk.Y, expand=True) # Use expand for even distribution
-                self.player_widgets[pid] = player_frame # Store for later updates
-
-                # Player name
-                name_text = player_data.get('name', 'Unknown')
-                if pid == self.dealer_player_id:
-                    name_text += " (D)" # Mark dealer
-                
-                name_label = tk.Label(player_frame, text=name_text, 
-                                     bg='#2E7D32', fg='white', font=('Arial', 10, 'bold'))
-                name_label.pack(padx=5, pady=2)
-                
-                # Player chips
-                chips_label = tk.Label(player_frame, text=f"${player_data.get('chips', 0)}", 
-                                     bg='#2E7D32', fg='white', font=('Arial', 9))
-                chips_label.pack(padx=5)
-                
-                # Player bet
-                bet = player_data.get('current_bet', 0)
-                bet_label = tk.Label(player_frame, text=f"Bet: ${bet}", 
-                                     bg='#2E7D32', fg='yellow', font=('Arial', 9))
-                bet_label.pack(padx=5)
-
-                # Player status
-                status_text = ""
-                status_color = 'white'
-                if player_data.get('is_folded'):
-                    status_text = "FOLDED"
-                    status_color = 'red'
-                elif player_data.get('is_all_in'):
-                    status_text = "ALL IN"
-                    status_color = 'orange'
-                elif pid == self.current_player_id:
-                    status_text = "TO ACT"
-                    status_color = 'cyan'
-                
-                status_label = tk.Label(player_frame, text=status_text, 
-                                        bg='#2E7D32', fg=status_color, font=('Arial', 8, 'bold'))
-                status_label.pack(padx=5)
-                
-                # Player cards
-                cards_frame = tk.Frame(player_frame, bg='#2E7D32')
-                cards_frame.pack(padx=5, pady=2)
-
-                for card_data in player_data.get('cards', []):
-                    card_image = self.card_images.get(card_data['image'])
-                    if not card_image: # Fallback to card back if specific image not found
-                        card_image = self.card_back_image
-                    
-                    card_label = tk.Label(cards_frame, image=card_image, bg='#2E7D32')
-                    card_label.pack(side=tk.LEFT, padx=1)
-    
-    def update_my_cards(self, cards):
-        """Update my cards display"""
-        for widget in self.my_cards_display_frame.winfo_children():
-            widget.destroy()
-        
-        for card_data in cards:
-            card_image = self.card_images.get(card_data['image'])
-            if card_image:
-                label = tk.Label(self.my_cards_display_frame, image=card_image, bg='#1A5D4A')
-                label.pack(side=tk.LEFT, padx=2)
-    
-    def update_action_buttons(self, is_my_turn):
-        """Update action buttons based on game state and current player"""
-        # Disable all buttons initially
-        self.fold_btn.config(state=tk.DISABLED)
-        self.check_btn.config(state=tk.DISABLED)
-        self.call_btn.config(state=tk.DISABLED)
-        self.raise_btn.config(state=tk.DISABLED)
-        self.all_in_btn.config(state=tk.DISABLED)
-
-        if not is_my_turn or not self.game_data:
-            return
-            
+        # Draw players
         players = self.game_data.get('players', {})
-        my_data = players.get(self.player_id)
+        other_players = {pid: p for pid, p in players.items() if pid != self.player_id}
         
-        if not my_data or my_data.get('is_folded') or my_data.get('is_all_in') or my_data.get('chips', 0) <= 0:
-            return # Player cannot act
-        
-        current_bet = self.game_data.get('current_bet', 0)
-        my_bet = my_data.get('current_bet', 0)
-        my_chips = my_data.get('chips', 0)
-        
-        self.fold_btn.config(state=tk.NORMAL) # Fold is always an option if you can act
-        
-        # Determine Check/Call
-        if current_bet == my_bet:
-            self.check_btn.config(state=tk.NORMAL)
-            self.call_btn.config(text="Call") # Reset text if it was showing amount
-        else:
-            call_amount = current_bet - my_bet
-            if my_chips >= call_amount:
-                self.call_btn.config(state=tk.NORMAL, text=f"Call ${call_amount}")
-            else: # Not enough chips to call, can only go all-in or fold
-                # If they can't call, their "call" is effectively an all-in
-                self.call_btn.config(state=tk.DISABLED) 
-                
-        # Raise button logic
-        # Player must have enough chips to at least call the current bet AND then raise.
-        # Min raise is typically the size of the big blind, or the size of the previous raise.
-        # For simplicity, let's use big blind as min increment for raise.
-        
-        min_raise_increment = self.game_data.get('big_blind', 20)
-        
-        # The amount to match the current bet
-        amount_to_match = current_bet - my_bet
+        # Draw other players at the top
+        for i, (pid, player) in enumerate(other_players.items()):
+            x = 100 + i * 200
+            y = 100
+            self.draw_player_info(player, x, y, pid)
 
-        # Minimum total bet for a raise (current_bet + min_raise_increment)
-        min_total_raise_amount = current_bet + min_raise_increment
+        # Draw my player info at the bottom
+        my_player_data = players.get(self.player_id)
+        if my_player_data:
+            self.draw_player_info(my_player_data, self.screen_width / 2 - 100, self.screen_height - 250, self.player_id, is_me=True)
 
-        # Player must have enough chips to at least make the minimum raise
-        if my_chips >= min_total_raise_amount - my_bet:
-            self.raise_btn.config(state=tk.NORMAL)
+        # Draw buttons
+        for button in self.buttons.values():
+            button.draw(self.screen)
+
+    def draw_player_info(self, player_data, x, y, pid, is_me=False):
+        """Draws a single player's information box."""
+        name = player_data.get('name', 'Unknown')
+        chips = player_data.get('chips', 0)
+        bet = player_data.get('current_bet', 0)
+        cards = player_data.get('cards', [])
+
+        # Highlight current player and dealer
+        border_color = 'gray'
+        if pid == self.current_player_id: border_color = 'cyan'
         
-        # All-in button is always available if player has chips
-        if my_chips > 0:
-            self.all_in_btn.config(state=tk.NORMAL)
+        box_rect = pygame.Rect(x, y, 180, 160)
+        pygame.draw.rect(self.screen, pygame.Color('#1A5D4A'), box_rect, border_radius=10)
+        pygame.draw.rect(self.screen, pygame.Color(border_color), box_rect, 2, border_radius=10)
 
+        display_name = name
+        if pid == self.dealer_player_id: display_name += " (D)"
+        self.draw_text(display_name, self.font_md, 'white', x + 10, y + 5)
+        self.draw_text(f"Chips: ${chips}", self.font_sm, 'white', x + 10, y + 35)
+        self.draw_text(f"Bet: ${bet}", self.font_sm, 'yellow', x + 10, y + 55)
+
+        # Draw status like FOLDED or ALL-IN
+        status_text = ""
+        if player_data.get('is_folded'): status_text = "FOLDED"
+        if player_data.get('is_all_in'): status_text = "ALL IN"
+        if status_text:
+             self.draw_text(status_text, self.font_md, 'red', box_rect.centerx, y + 140, center=True)
+
+        # Draw cards
+        for i, card_info in enumerate(cards):
+            # For other players, the server sends card_back.jpg image name
+            img = self.card_images.get(card_info['image']) if 'image' in card_info and card_info['image'] != 'card_back.jpg' else self.card_back_image
+            if img:
+                 card_pos_y = y - 110 if not is_me else y + 80
+                 self.screen.blit(img, (x + 10 + i * 85, card_pos_y))
+    
+    def draw_raise_dialog(self):
+        """Draws a modal dialog for entering a raise amount."""
+        # Semi-transparent overlay
+        overlay = pygame.Surface((self.screen_width, self.screen_height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))
+        self.screen.blit(overlay, (0, 0))
+
+        # Dialog box
+        dialog_rect = pygame.Rect(self.screen_width // 2 - 150, self.screen_height // 2 - 100, 300, 200)
+        pygame.draw.rect(self.screen, self.bg_color, dialog_rect, border_radius=15)
+        pygame.draw.rect(self.screen, 'white', dialog_rect, 2, border_radius=15)
+        
+        self.draw_text("Raise Amount:", self.font_md, 'white', dialog_rect.centerx, dialog_rect.y + 30, center=True)
+        self.raise_input_box.draw(self.screen)
+        self.confirm_raise_button.draw(self.screen)
+
+
+    # --- Action Methods ---
     def send_action(self, action, amount=0):
-        """Send action to server"""
         if not self.connected:
-            messagebox.showwarning("Not Connected", "You are not connected to the server.")
+            print("Not connected to server.")
             return
-            
-        message = {
-            'type': 'action',
-            'player_id': self.player_id,
-            'action': action,
-            'amount': amount
-        }
-        
+        message = {'type': 'action', 'player_id': self.player_id, 'action': action, 'amount': amount}
         try:
-            self.socket.send(json.dumps(message).encode('utf-8') + b'\n') # Add newline for server parsing
+            self.socket.send(json.dumps(message).encode('utf-8') + b'\n')
         except Exception as e:
             print(f"Error sending action: {e}")
-            self.connected = False # Assume disconnection
-            self.root.after(0, lambda: messagebox.showerror("Connection Error", "Failed to send action. Disconnected from server."))
-            self.root.after(0, self.root.quit)
-    
-    def fold_action(self):
-        """Fold action"""
-        self.send_action('fold')
-    
-    def check_action(self):
-        """Check action"""
-        self.send_action('check')
-    
-    def call_action(self):
-        """Call action"""
-        if not self.game_data or self.player_id not in self.game_data.get('players', {}):
-            return
-        
-        my_data = self.game_data['players'][self.player_id]
-        current_bet = self.game_data.get('current_bet', 0)
-        my_bet = my_data.get('current_bet', 0)
-        call_amount_needed = current_bet - my_bet
-        
-        # If player doesn't have enough to call the full amount, their call is an all-in
-        if my_data.get('chips', 0) <= call_amount_needed:
-            self.send_action('all_in') # Send all-in if cannot afford full call
-        else:
-            self.send_action('call')
-    
+            self.connected = False
+
+    def fold_action(self): self.send_action('fold')
+    def check_action(self): self.send_action('check')
+    def call_action(self): self.send_action('call')
+    def all_in_action(self): self.send_action('all_in')
+    def start_game(self): self.send_action('start_game')
+
     def raise_action(self):
-        """Raise action"""
-        if not self.game_data or self.player_id not in self.game_data.get('players', {}):
-            return
-            
-        my_data = self.game_data['players'][self.player_id]
+        self.raise_input_active = True
+        my_data = self.game_data.get('players', {}).get(self.player_id, {})
         current_bet = self.game_data.get('current_bet', 0)
-        my_chips = my_data.get('chips', 0)
-        my_current_bet = my_data.get('current_bet', 0)
-        
         min_raise_increment = self.game_data.get('big_blind', 20)
-        min_total_raise_amount = current_bet + min_raise_increment
+        min_raise = current_bet + min_raise_increment
+        self.raise_input_box.text = str(min_raise) # Pre-fill with min raise amount
 
-        # Player can only raise up to their total chips (current chips + chips already bet this round)
-        max_total_bet_possible = my_chips + my_current_bet
+    def confirm_raise(self):
+        try:
+            amount = int(self.raise_input_box.text)
+            self.send_action('raise', amount)
+            self.raise_input_active = False
+            self.raise_input_box.text = "" # Clear for next time
+        except ValueError:
+            print("Invalid raise amount. Please enter a number.")
 
-        raise_dialog = tk.Toplevel(self.root)
-        raise_dialog.title("Raise Amount")
-        raise_dialog.geometry("300x200")
-        raise_dialog.grab_set()
-        raise_dialog.configure(bg='#0D4F3C')
-        
-        tk.Label(raise_dialog, text=f"Current Bet: ${current_bet}", bg='#0D4F3C', fg='white', font=('Arial', 10)).pack(pady=(5,0))
-        tk.Label(raise_dialog, text=f"Your Current Bet: ${my_current_bet}", bg='#0D4F3C', fg='white', font=('Arial', 10)).pack(pady=(0,5))
-        tk.Label(raise_dialog, text=f"Your Chips: ${my_chips}", bg='#0D4F3C', fg='white', font=('Arial', 10)).pack(pady=(0,5))
-        tk.Label(raise_dialog, text=f"Raise to (min ${min_total_raise_amount}):", 
-                 bg='#0D4F3C', fg='white', font=('Arial', 12)).pack(pady=(10,5))
-        
-        # Pre-fill with the minimum valid raise amount
-        amount_var = tk.StringVar(value=str(min_total_raise_amount))
-        amount_entry = tk.Entry(raise_dialog, textvariable=amount_var, font=('Arial', 12))
-        amount_entry.pack(pady=5)
-        
-        def confirm_raise():
-            try:
-                amount = int(amount_var.get())
-                # Player must bet at least the minimum raise amount, and not more than their total chips
-                if amount >= min_total_raise_amount and amount <= max_total_bet_possible:
-                    self.send_action('raise', amount)
-                    raise_dialog.destroy()
-                else:
-                    messagebox.showerror("Invalid Raise", f"Amount must be between ${min_total_raise_amount} and ${max_total_bet_possible}", parent=raise_dialog)
-            except ValueError:
-                messagebox.showerror("Invalid Input", "Please enter a valid number for the raise amount.", parent=raise_dialog)
-        
-        tk.Button(raise_dialog, text="Raise", command=confirm_raise,
-                  bg='#4CAF50', fg='white', font=('Arial', 10)).pack(pady=10)
-    
-    def all_in_action(self):
-        """All-in action"""
-        self.send_action('all_in')
-    
-    def start_game(self):
-        """Send request to start a new game to the server."""
-        if not self.connected:
-            messagebox.showwarning("Not Connected", "You are not connected to the server.")
-            return
-        
-        message = {
-            'type': 'start_game',
-            'player_id': self.player_id
-        }
-        
-        try:
-            self.socket.send(json.dumps(message).encode('utf-8') + b'\n') # Add newline for server parsing
-        except Exception as e:
-            print(f"Error starting game: {e}")
-            self.connected = False # Assume disconnection
-            self.root.after(0, lambda: messagebox.showerror("Connection Error", "Failed to send start game request. Disconnected from server."))
-            self.root.after(0, self.root.quit)
-    
-    def update_status(self, message):
-        """Update status message (e.g., in console or a dedicated status bar)"""
-        print(f"Client Status: {message}")
-    
-    def run(self):
-        """Runs the Tkinter event loop for the client."""
-        try:
-            self.root.mainloop()
-        except KeyboardInterrupt:
-            pass # Allow graceful exit on Ctrl+C
-        finally:
-            if self.connected and self.socket:
-                self.socket.close()
 
 if __name__ == '__main__':
     client = PokerClient()
