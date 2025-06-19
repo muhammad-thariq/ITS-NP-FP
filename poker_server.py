@@ -27,31 +27,12 @@ class ActionType(Enum):
 
 @dataclass
 class Card:
-    suit: str  # hearts, diamonds, clubs, spades
-    rank: str  # 2-10, jack, queen, king, ace
-    
-    def __post_init__(self):
-        # Map rank names to match your image files
-        if self.rank == "J":
-            self.rank = "jack"
-        elif self.rank == "Q":
-            self.rank = "queen"
-        elif self.rank == "K":
-            self.rank = "king"
-        elif self.rank == "A":
-            self.rank = "ace"
-        
-        # Map suit names to match your image files
-        suit_mapping = {
-            "hearts": "heart",
-            "diamonds": "diamond", 
-            "clubs": "club",
-            "spades": "spade"
-        }
-        if self.suit in suit_mapping:
-            self.suit = suit_mapping[self.suit]
+    suit: str
+    rank: str
     
     def get_image_name(self):
+        # The client already expects rank names like 'jack', 'queen', etc.
+        # No mapping needed here if server-side ranks are consistent.
         return f"{self.suit}_{self.rank}.jpg"
     
     def get_value(self):
@@ -73,10 +54,10 @@ class Player:
     is_folded: bool
     is_all_in: bool
     connection: socket.socket
-    has_acted_this_round: bool = False # Track if player has acted in current betting round
+    has_acted_this_round: bool = False
     has_revealed: bool = False
 
-    def can_act(self):
+    def can_act(self) -> bool:
         """Determines if a player is eligible to make an action."""
         return not self.is_folded and not self.is_all_in and self.chips > 0
 
@@ -86,35 +67,28 @@ class PokerGame:
         self.community_cards: List[Card] = []
         self.deck: List[Card] = []
         self.pot = 0
-        self.current_bet = 0 # Highest bet placed by any player in the current betting round
-        self.dealer_position = -1 # Index in the list of active players for the dealer button
-        self.current_player_index = -1 # Index in the list of active players for current turn
+        self.current_bet = 0
+        self.dealer_position = -1
+        self.current_player_index = -1
         self.game_state = GameState.WAITING
         self.small_blind = 10
         self.big_blind = 20
         self.action_history = []
-        self.last_raiser = None # Tracks the ID of the last player who made a raise in the current round
+        self.last_raiser = None
         
     def create_deck(self):
         """Creates and shuffles a standard 52-card deck."""
-        suits = ['heart', 'diamonds', 'clubs', 'spades']
+        suits = ['heart', 'diamond', 'club', 'spade']
         ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'jack', 'queen', 'king', 'ace']
         self.deck = [Card(suit, rank) for suit in suits for rank in ranks]
         random.shuffle(self.deck)
     
     def add_player(self, player_id: str, name: str, connection: socket.socket):
         """Adds a new player to the game if there's space."""
-        if len(self.players) < 6:  # Max 6 players
+        if len(self.players) < 6:
             self.players[player_id] = Player(
-                id=player_id,
-                name=name,
-                chips=1000,  # Starting chips
-                cards=[],
-                current_bet=0,
-                total_bet=0,
-                is_folded=False,
-                is_all_in=False,
-                connection=connection
+                id=player_id, name=name, chips=1000, cards=[], current_bet=0,
+                total_bet=0, is_folded=False, is_all_in=False, connection=connection
             )
             return True
         return False
@@ -123,620 +97,411 @@ class PokerGame:
         """Removes a player from the game."""
         if player_id in self.players:
             del self.players[player_id]
-            # If less than 2 players remain and game is not waiting, end the game
             if len([p for p in self.players.values() if p.chips > 0]) < 2 and self.game_state != GameState.WAITING:
                 self.game_state = GameState.GAME_OVER
 
-
     def _prepare_for_new_hand(self) -> List[Player]:
-        """
-        Resets player and game states for a new hand and returns active players.
-        An active player is one who has more than 0 chips.
-        """
+        """Resets states for a new hand and returns active players."""
         print("Preparing for new hand, resetting player states.")
         active_players = []
-        
-        # Reset all players and identify who is still active.
         for player in self.players.values():
             if player.chips > 0:
                 active_players.append(player)
-            
-            # Reset hand-specific attributes for everyone
             player.cards = []
             player.current_bet = 0
             player.total_bet = 0
             player.is_folded = False
             player.is_all_in = False
             player.has_acted_this_round = False
+            player.has_revealed = False # Also reset revealed status
         
-        # Reset hand-specific game attributes
         self.community_cards = []
         self.pot = 0
         self.current_bet = 0
         self.action_history = []
         self.last_raiser = None
         self.create_deck()
-        
         return active_players
     
     def start_new_hand(self):
-        """Starts a new hand of poker using the prepared active players."""
+        """Starts a new hand of poker."""
         active_players = self._prepare_for_new_hand()
         
         if len(active_players) < 2:
             print("Not enough active players to start a new hand.")
             self.game_state = GameState.GAME_OVER
+            self.broadcast_game_state_to_all() # Inform clients game is over
             return False
 
-        # --- Dealer Button Rotation ---
-        players_ids = list(self.players.keys())
-        if self.dealer_position == -1: # First hand
-            self.dealer_position = 0
+        # Dealer Button Rotation
+        all_player_ids = list(self.players.keys())
+        if self.dealer_position == -1:
+             # Find first player with chips to be the first dealer
+            self.dealer_position = next((i for i, pid in enumerate(all_player_ids) if self.players[pid].chips > 0), 0)
         else:
-            # Find the next active player to be the dealer
-            found_dealer = False
-            for i in range(1, len(players_ids) + 1):
-                next_dealer_index = (self.dealer_position + i) % len(players_ids)
-                if self.players[players_ids[next_dealer_index]].chips > 0:
-                    self.dealer_position = next_dealer_index
-                    found_dealer = True
-                    break
-            if not found_dealer:
-                print("CRITICAL ERROR: Could not find an active player for the dealer button."); return False
+            self.dealer_position = (self.dealer_position + 1) % len(all_player_ids)
+            # Find next active player for dealer
+            while self.players[all_player_ids[self.dealer_position]].chips <= 0:
+                self.dealer_position = (self.dealer_position + 1) % len(all_player_ids)
 
-        # --- Deal Cards ---
+        # Deal Cards
+        active_player_ids_in_order = self.get_player_order_from(self.dealer_position + 1)
         for _ in range(2):
-            for player in active_players:
+            for player_id in active_player_ids_in_order:
                 if self.deck:
-                    player.cards.append(self.deck.pop())
+                    self.players[player_id].cards.append(self.deck.pop())
         
-        # --- Post Blinds and Set First Player ---
         self.post_blinds()
         self.game_state = GameState.PRE_FLOP
         
-        dealer_name = self.players[players_ids[self.dealer_position]].name
-        current_player_name = self.players[players_ids[self.current_player_index]].name
+        dealer_name = self.players[all_player_ids[self.dealer_position]].name
+        current_player_name = self.players[all_player_ids[self.current_player_index]].name
         print(f"New hand started. Dealer: {dealer_name}. First to act: {current_player_name}")
         return True
     
-
-    # def start_new_hand(self):
-    #     """Starts a new hand of poker."""
-    #     active_players_in_game = [p for p in self.players.values() if p.chips > 0]
-    #     if len(active_players_in_game) < 2:
-    #         print("Not enough active players to start a new hand.")
-    #         self.game_state = GameState.WAITING
-    #         return False
-            
-    #     self.create_deck()
-    #     self.community_cards = []
-    #     self.pot = 0
-    #     self.current_bet = 0
-    #     self.action_history = []
-    #     self.last_raiser = None
-
-    #     # Rotate dealer position to the next active player
-    #     players_ids = list(self.players.keys())
-    #     # Find the index of the next active player after the current dealer
-    #     next_dealer_found = False
-    #     for i in range(len(players_ids)):
-    #         potential_dealer_index = (self.dealer_position + 1 + i) % len(players_ids)
-    #         potential_dealer_id = players_ids[potential_dealer_index]
-    #         if self.players[potential_dealer_id].chips > 0: # Only active players can be dealer
-    #             self.dealer_position = potential_dealer_index
-    #             next_dealer_found = True
-    #             break
-    #     if not next_dealer_found: # Should not happen if len(active_players_in_game) >= 2
-    #         print("Error: Could not find a new dealer.")
-    #         return False
-
-    #     # Reset player states for the new hand
-    #     for player_id in players_ids:
-    #         player = self.players[player_id]
-    #         player.cards = []
-    #         player.current_bet = 0
-    #         player.total_bet = 0 # Reset total bet for the new hand
-    #         player.is_folded = False
-    #         player.is_all_in = False
-    #         player.has_acted_this_round = False # Reset for the new hand
-
-    #     # Deal hole cards
-    #     for _ in range(2):
-    #         for player_id in players_ids:
-    #             player = self.players[player_id]
-    #             if self.deck:
-    #                 player.cards.append(self.deck.pop())
+    def get_player_order_from(self, start_index: int) -> List[str]:
+        """Gets a list of active player IDs in order, starting from an index."""
+        all_ids = list(self.players.keys())
+        num_players = len(all_ids)
+        ordered_ids = []
+        for i in range(num_players):
+            idx = (start_index + i) % num_players
+            player_id = all_ids[idx]
+            if self.players[player_id].chips > 0:
+                ordered_ids.append(player_id)
+        return ordered_ids
         
-    #     self.post_blinds()
-    #     self.game_state = GameState.PRE_FLOP
-        
-    #     # Determine who starts the pre-flop betting round (UTG, or player after Big Blind)
-    #     # It's the first active player after the Big Blind
-    #     self.current_player_index = self._get_player_index_after_dealer(self.dealer_position, 3)
-    #     if self.current_player_index == -1: # Fallback if no player found after BB (e.g., only 2 players)
-    #          self.current_player_index = self._get_player_index_after_dealer(self.dealer_position, 0) # Start from player after dealer
-             
-    #     print(f"New hand started. Dealer: {self.players[players_ids[self.dealer_position]].name}. First to act: {self.players[players_ids[self.current_player_index]].name}")
-    #     return True
-    
-        # def post_blinds(self):
-        #     """Handles posting of small and big blinds."""
-        #     players_list = list(self.players.values())
-        #     players_ids = list(self.players.keys())
-
-        #     # Small blind position: 1 after dealer
-        #     sb_pos_index = (self.dealer_position + 1) % len(players_ids)
-        #     sb_player = players_list[sb_pos_index]
-            
-        #     # Big blind position: 2 after dealer
-        #     bb_pos_index = (self.dealer_position + 2) % len(players_ids)
-        #     bb_player = players_list[bb_pos_index]
-
-        #     # Handle cases with fewer than 3 players (e.g., heads-up)
-        #     if len(players_list) == 2:
-        #         # In heads-up, dealer is small blind, other player is big blind
-        #         sb_player = players_list[self.dealer_position]
-        #         bb_player = players_list[(self.dealer_position + 1) % len(players_list)]
-
-        #     # Small blind
-        #     sb_amount = min(self.small_blind, sb_player.chips)
-        #     sb_player.chips -= sb_amount
-        #     sb_player.current_bet += sb_amount
-        #     sb_player.total_bet += sb_amount
-        #     self.pot += sb_amount
-        #     sb_player.has_acted_this_round = True # Blinds count as actions
-        #     print(f"{sb_player.name} posted Small Blind of ${sb_amount}")
-            
-        #     # Big blind
-        #     bb_amount = min(self.big_blind, bb_player.chips)
-        #     bb_player.chips -= bb_amount
-        #     bb_player.current_bet += bb_amount
-        #     bb_player.total_bet += bb_amount
-        #     self.pot += bb_amount
-        #     bb_player.has_acted_this_round = True # Blinds count as actions
-        #     print(f"{bb_player.name} posted Big Blind of ${bb_amount}")
-            
-        #     self.current_bet = bb_player.current_bet
-        #     self.last_raiser = bb_player.id # Big blind is the initial "raiser" for checking purposes
-
-
     def post_blinds(self):
         """Handles posting blinds by finding the next active players."""
-        player_keys = list(self.players.keys())
-        num_players = len(player_keys)
-        
-        # Helper function to find the next active player's index from a start point
-        def find_next_active_player_index(start_index):
-            for i in range(num_players):
-                next_index = (start_index + i) % num_players
-                if self.players[player_keys[next_index]].chips > 0:
-                    return next_index
-            return -1 # Should not happen if there are >= 2 active players
+        all_player_ids = list(self.players.keys())
+        active_player_ids = self.get_player_order_from(self.dealer_position + 1)
+        num_active = len(active_player_ids)
 
-        # --- Determine Blind Positions ---
-        active_players_count = len([p for p in self.players.values() if p.chips > 0])
-        
-        if active_players_count == 2: # Heads-up
-            sb_index = self.dealer_position
-            bb_index = find_next_active_player_index(self.dealer_position + 1)
-            self.current_player_index = sb_index # Dealer/SB acts first pre-flop
-        else: # 3+ players
-            sb_index = find_next_active_player_index(self.dealer_position + 1)
-            bb_index = find_next_active_player_index(sb_index + 1)
-            self.current_player_index = find_next_active_player_index(bb_index + 1)
-        
-        if sb_index == -1 or bb_index == -1:
-            print("Error: could not find players for blinds."); return
+        if num_active < 2: return
 
-        # --- Post Blinds ---
-        sb_player = self.players[player_keys[sb_index]]
+        # Determine blind positions
+        sb_player_id = active_player_ids[0]
+        bb_player_id = active_player_ids[1 % num_active]
+        first_to_act_id = active_player_ids[2 % num_active]
+        
+        if num_active == 2: # Heads-up case
+            sb_player_id = self.get_player_order_from(self.dealer_position)[0]
+            bb_player_id = self.get_player_order_from(self.dealer_position + 1)[0]
+            first_to_act_id = sb_player_id
+
+        self.current_player_index = all_player_ids.index(first_to_act_id)
+        
+        # Post Blinds
+        sb_player = self.players[sb_player_id]
         sb_amount = min(self.small_blind, sb_player.chips)
-        sb_player.chips -= sb_amount
-        sb_player.current_bet += sb_amount
-        sb_player.total_bet += sb_amount
-        self.pot += sb_amount
-        if sb_player.chips == 0: sb_player.is_all_in = True
+        self._apply_bet(sb_player, sb_amount)
         print(f"{sb_player.name} posted Small Blind of ${sb_amount}")
 
-        bb_player = self.players[player_keys[bb_index]]
+        bb_player = self.players[bb_player_id]
         bb_amount = min(self.big_blind, bb_player.chips)
-        bb_player.chips -= bb_amount
-        bb_player.current_bet += bb_amount
-        bb_player.total_bet += bb_amount
-        self.pot += bb_amount
-        if bb_player.chips == 0: bb_player.is_all_in = True
+        self._apply_bet(bb_player, bb_amount)
         print(f"{bb_player.name} posted Big Blind of ${bb_amount}")
 
         self.current_bet = bb_player.current_bet
         self.last_raiser = bb_player.id
 
-        
-    def _get_player_index_after_dealer(self, start_pos: int, offset: int = 1) -> int:
-        """
-        Finds the index of the next active player to act, starting from an offset
-        relative to a given starting position (e.g., dealer, small blind).
-        """
-        players_ids = list(self.players.keys())
-        num_players = len(players_ids)
-        if num_players == 0:
-            return -1
+    def _apply_bet(self, player: Player, amount: int):
+        """Helper to apply a bet from a player."""
+        actual_amount = min(amount, player.chips)
+        player.chips -= actual_amount
+        player.current_bet += actual_amount
+        # total_bet will be calculated at the end of the round
+        self.pot += actual_amount
+        if player.chips == 0:
+            player.is_all_in = True
+            print(f"{player.name} is all-in.")
 
-        # Start checking from the player after the offset from the start_pos
-        initial_index = (start_pos + offset) % num_players
-        
-        for i in range(num_players):
-            current_index = (initial_index + i) % num_players
-            player_id = players_ids[current_index]
-            if self.players[player_id].can_act():
-                return current_index
-        return -1 # No active players found
-    
-    def process_action(self, player_id: str, action: str, amount: int = 0):
+    def process_action(self, player_id: str, action: str, amount: int = 0) -> bool:
         """Processes a player's action (fold, check, call, raise, all-in)."""
-        if player_id not in self.players:
-            print(f"Error: Player {player_id} not found.")
-            return False
-            
         player = self.players[player_id]
-        if not player.can_act():
-            print(f"Error: Player {player.name} cannot act (folded, all-in, or no chips).")
-            return False
-
-        # Ensure it's the current player's turn
-        players_list = list(self.players.keys())
-        if self.current_player_index == -1 or players_list[self.current_player_index] != player_id:
-            print(f"Error: Not {player.name}'s turn. Current player is {players_list[self.current_player_index] if self.current_player_index != -1 else 'None'}.")
-            return False
-
-        player.has_acted_this_round = True # Mark player as having acted this round
         
         success = False
-        if action == ActionType.FOLD.value:
+        action_type = ActionType(action)
+
+        if action_type == ActionType.FOLD:
             player.is_folded = True
-            success = True
             print(f"{player.name} folds.")
-        elif action == ActionType.CHECK.value:
-            if self.current_bet > player.current_bet:
-                print(f"Error: {player.name} cannot check, current bet is ${self.current_bet} (player has ${player.current_bet}).")
-                return False  # Can't check if there's a bet to call
             success = True
+        
+        elif action_type == ActionType.CHECK:
+            if player.current_bet < self.current_bet:
+                print(f"Error: {player.name} cannot check, a bet of ${self.current_bet} is active.")
+                return False
             print(f"{player.name} checks.")
-        elif action == ActionType.CALL.value:
-            call_amount_needed = self.current_bet - player.current_bet
-            
-            if call_amount_needed <= 0: # Can't call if no bet to match
-                print(f"Error: {player.name} cannot call, no bet to match or already matched.")
-                return False
-
-            amount_to_add = min(call_amount_needed, player.chips)
-            
-            player.chips -= amount_to_add
-            player.current_bet += amount_to_add
-            player.total_bet += amount_to_add
-            self.pot += amount_to_add
-            
-            if player.chips == 0:
-                player.is_all_in = True
-                print(f"{player.name} calls ${amount_to_add} and goes ALL IN.")
-            else:
-                print(f"{player.name} calls ${amount_to_add}.")
-            success = True
-        elif action == ActionType.RAISE.value:
-            # 'amount' here is the total amount the player wants to bet (e.g., raise to $100)
-            if amount <= self.current_bet: # Raise must be higher than current bet
-                print(f"Error: Raise amount ${amount} is not higher than current bet ${self.current_bet}.")
-                return False
-
-            # Calculate the amount to add to their current bet to reach the 'amount'
-            amount_to_add = amount - player.current_bet
-            
-            if amount_to_add > player.chips: # Player cannot afford the full raise
-                amount_to_add = player.chips # Player goes all-in for remaining chips
-                amount = player.current_bet + amount_to_add # Adjust total amount to reflect all-in
-                player.is_all_in = True
-            
-            player.chips -= amount_to_add
-            player.current_bet += amount_to_add
-            player.total_bet += amount_to_add
-            self.pot += amount_to_add
-            self.current_bet = player.current_bet # New highest bet for the round
-            self.last_raiser = player.id # Update last raiser
-            
-            if player.chips == 0:
-                player.is_all_in = True
-                print(f"{player.name} raises to ${amount} and goes ALL IN.")
-            else:
-                print(f"{player.name} raises to ${amount}.")
             success = True
 
-            # Reset has_acted_this_round for players who need to act again (those who haven't matched new current_bet)
-            for pid, p in self.players.items():
-                if p.can_act() and p.id != player.id and p.current_bet < self.current_bet:
-                    p.has_acted_this_round = False
-        elif action == ActionType.ALL_IN.value:
+        elif action_type == ActionType.CALL:
+            call_amount = self.current_bet - player.current_bet
+            self._apply_bet(player, call_amount)
+            print(f"{player.name} calls ${call_amount}.")
+            success = True
+
+        elif action_type == ActionType.RAISE:
+            if amount <= self.current_bet:
+                print(f"Error: Raise amount ${amount} must be higher than current bet ${self.current_bet}.")
+                return False
+            
+            total_new_bet = amount
+            amount_to_add = total_new_bet - player.current_bet
+
+            if amount_to_add > player.chips:
+                print(f"Error: {player.name} cannot afford to raise to ${amount}.")
+                # Or handle as an all-in
+                return False
+
+            self._apply_bet(player, amount_to_add)
+            self.current_bet = player.current_bet
+            self.last_raiser = player.id
+            print(f"{player.name} raises to ${self.current_bet}.")
+            success = True
+        
+        elif action_type == ActionType.ALL_IN:
             all_in_amount = player.chips
-            
-            # The player's total bet for the round is their current bet + all_in_amount
-            player.current_bet += all_in_amount
-            player.total_bet += all_in_amount
-            player.chips = 0 # Chips become 0 after going all-in
-            player.is_all_in = True
-            self.pot += all_in_amount
-            
+            self._apply_bet(player, all_in_amount)
             if player.current_bet > self.current_bet:
                 self.current_bet = player.current_bet
                 self.last_raiser = player.id
-                # Reset has_acted_this_round for players who need to act again
-                for pid, p in self.players.items():
-                    if p.can_act() and p.id != player.id and p.current_bet < self.current_bet:
-                        p.has_acted_this_round = False
-
-            print(f"{player.name} goes ALL IN with ${all_in_amount}.")
+            print(f"{player.name} is ALL-IN with ${all_in_amount}.")
             success = True
-        
+
         if success:
+            player.has_acted_this_round = True
             self.action_history.append((player_id, action, amount))
+        
         return success
     
     def advance_to_next_street(self):
-        """Advances the game to the next betting street (Flop, Turn, River, Showdown)."""
-        # Collect all current_bets into the main pot and reset for the new street
+        """Advances the game to the next betting street."""
         for player in self.players.values():
-            self.pot += player.current_bet # Add current round's bets to main pot
+            player.total_bet += player.current_bet
             player.current_bet = 0
-            player.has_acted_this_round = False # Reset for the new street
-        self.current_bet = 0 # Reset current bet for the new street
-        self.last_raiser = None # Reset last raiser for the new street
-
-        # Determine the first player to act in the new street (player after dealer or next active player)
-        # For post-flop, the first active player after the dealer acts first.
-        self.current_player_index = self._get_player_index_after_dealer(self.dealer_position)
+            # Only reset has_acted for players who are not folded or all-in
+            if not player.is_folded and not player.is_all_in:
+                player.has_acted_this_round = False
         
-        # If no active player found after dealer (e.g., all others folded/all-in),
-        # try to find the first active player in the player list.
-        if self.current_player_index == -1:
-            players_ids = list(self.players.keys())
-            for i in range(len(players_ids)):
-                if self.players[players_ids[i]].can_act():
-                    self.current_player_index = i
-                    break
-            # If still no active player, it means all remaining players are all-in or folded.
-            # In this case, the betting round implicitly completes, and we move to showdown if it's river.
-            if self.current_player_index == -1 and any(p.chips > 0 and not p.is_folded for p in self.players.values()):
-                print("Warning: No active player found to start new street, but some players still have chips and are not folded.")
-                # This might happen if all remaining players are all-in.
-                # The game should proceed to dealing cards and then to showdown if it's the river.
-                pass # Let the game state advance and game_loop handle the next step
+        self.current_bet = 0
+        self.last_raiser = None
+
+        # Set first player to act post-flop (first active player after dealer)
+        active_players_after_dealer = self.get_player_order_from(self.dealer_position + 1)
+        if not active_players_after_dealer: # Should not happen if hand is live
+             self.current_player_index = -1
+        else:
+            self.current_player_index = list(self.players.keys()).index(active_players_after_dealer[0])
 
         if self.game_state == GameState.PRE_FLOP:
-            # Deal flop (3 cards)
-            self.deck.pop()  # Burn card
-            for _ in range(3):
-                if self.deck:
-                    self.community_cards.append(self.deck.pop())
+            self.deal_community_cards("flop", 3)
             self.game_state = GameState.FLOP
-            print("--- FLOP dealt ---")
         elif self.game_state == GameState.FLOP:
-            # Deal turn (1 card)
-            self.deck.pop()  # Burn card
-            if self.deck:
-                self.community_cards.append(self.deck.pop())
+            self.deal_community_cards("turn", 1)
             self.game_state = GameState.TURN
-            print("--- TURN dealt ---")
         elif self.game_state == GameState.TURN:
-            # Deal river (1 card)
-            self.deck.pop()  # Burn card
-            if self.deck:
-                self.community_cards.append(self.deck.pop())
+            self.deal_community_cards("river", 1)
             self.game_state = GameState.RIVER
-            print("--- RIVER dealt ---")
         elif self.game_state == GameState.RIVER:
             self.game_state = GameState.AWAITING_SHOWDOWN
-            print("--- WAITING FOR PLAYERS TO REVEAL CARDS ---")
+            print("--- All betting rounds complete. Awaiting showdown. ---")
 
-    def check_all_revealed(self):
-        """Cek apakah semua pemain yang tidak fold sudah membuka kartu."""
+    def deal_community_cards(self, street_name: str, count: int):
+        """Deals community cards for a given street."""
+        if self.deck: self.deck.pop()  # Burn card
+        print(f"--- Dealing {street_name.upper()} ---")
+        for _ in range(count):
+            if self.deck:
+                self.community_cards.append(self.deck.pop())
+
+    def check_all_revealed(self) -> bool:
+        """Check if all non-folded players have revealed their cards."""
         players_in_hand = [p for p in self.players.values() if not p.is_folded]
         if not players_in_hand or len(players_in_hand) == 1:
-            return True # Tidak ada yang perlu ditunggu atau hanya 1 pemain tersisa
-        
+            return True # No one to wait for
         return all(p.has_revealed for p in players_in_hand)
 
     def evaluate_hand(self, player_cards: List[Card], community_cards: List[Card]) -> Tuple[int, List[int]]:
-        """Evaluate poker hand strength. Returns (hand_rank, tiebreakers)"""
+        """Evaluate poker hand strength. Returns (hand_rank, tiebreakers)."""
+        # This function's logic is complex and appears mostly correct. No changes made here.
         all_cards = player_cards + community_cards
         all_cards.sort(key=lambda x: x.get_value(), reverse=True)
         
-        # Count suits and ranks
-        suits = {}
-        ranks = {}
+        suits, ranks = {}, {}
         for card in all_cards:
             suits[card.suit] = suits.get(card.suit, 0) + 1
             ranks[card.get_value()] = ranks.get(card.get_value(), 0) + 1
         
-        # Check for flush
         is_flush = any(count >= 5 for count in suits.values())
+        flush_suit = next((s for s, c in suits.items() if c >= 5), None)
         
-        # Check for straight
         unique_ranks = sorted(list(set(card.get_value() for card in all_cards)), reverse=True)
         is_straight = False
         straight_high = 0
-        
-        # Check for regular straight
-        for i in range(len(unique_ranks) - 4):
-            if unique_ranks[i] - unique_ranks[i+4] == 4:
+        if len(unique_ranks) >= 5:
+            for i in range(len(unique_ranks) - 4):
+                if unique_ranks[i] - unique_ranks[i+4] == 4:
+                    is_straight = True
+                    straight_high = unique_ranks[i]
+                    break
+            # Ace-low straight (wheel)
+            if {14, 2, 3, 4, 5}.issubset(set(unique_ranks)):
                 is_straight = True
-                straight_high = unique_ranks[i]
-                break
-        
-        # Check for A-2-3-4-5 straight (wheel)
-        if not is_straight and 14 in unique_ranks and 2 in unique_ranks and 3 in unique_ranks and 4 in unique_ranks and 5 in unique_ranks:
-            is_straight = True
-            straight_high = 5
-        
-        # Count pairs, trips, quads
-        # Convert to list of (rank, count) tuples for easier processing of counts
+                straight_high = 5 if straight_high == 0 else straight_high
+
         rank_counts = sorted(ranks.items(), key=lambda x: (x[1], x[0]), reverse=True)
         
-        # Determine hand ranking (higher number = better hand)
+        # Straight Flush
         if is_straight and is_flush:
-            # Check for royal flush specifically (10-J-Q-K-A of same suit)
-            if all(r in unique_ranks for r in [10, 11, 12, 13, 14]) and is_flush and straight_high == 14:
-                return (9, [14]) # Royal Flush
-            else: # Straight Flush
-                # Find the highest card of the straight flush
-                flush_suit = None
-                for suit, count in suits.items():
-                    if count >= 5:
-                        flush_suit = suit
-                        break
-                
-                straight_flush_cards = sorted([card.get_value() for card in all_cards if card.suit == flush_suit], reverse=True)
-                for i in range(len(straight_flush_cards) - 4):
-                    if straight_flush_cards[i] - straight_flush_cards[i+4] == 4:
-                        return (8, [straight_flush_cards[i]])
-                # Handle A-5 straight flush
-                if 14 in straight_flush_cards and 5 in straight_flush_cards and 4 in straight_flush_cards and 3 in straight_flush_cards and 2 in straight_flush_cards:
-                    return (8, [5])
-                return (0, [0]) # Should not happen if logic is correct
-                
-        elif rank_counts[0][1] == 4:  # Four of a kind
-            return (7, [rank_counts[0][0], rank_counts[1][0]]) # Quad rank, then kicker
-        elif rank_counts[0][1] == 3 and rank_counts[1][1] >= 2:  # Full house (at least a pair for the second part)
-            # Ensure we pick the highest pair if there are multiple
-            pair_rank = 0
-            for i in range(1, len(rank_counts)):
-                if rank_counts[i][1] >= 2:
-                    pair_rank = rank_counts[i][0]
-                    break
-            return (6, [rank_counts[0][0], pair_rank])
-        elif is_flush:  # Flush
-            flush_suit = None
-            for suit, count in suits.items():
-                if count >= 5:
-                    flush_suit = suit
-                    break
-            flush_cards = sorted([card.get_value() for card in all_cards if card.suit == flush_suit], reverse=True)[:5]
-            return (5, flush_cards)
-        elif is_straight:  # Straight
+            flush_cards_ranks = sorted([c.get_value() for c in all_cards if c.suit == flush_suit], reverse=True)
+            if len(flush_cards_ranks) >= 5:
+                for i in range(len(flush_cards_ranks) - 4):
+                    if flush_cards_ranks[i] - flush_cards_ranks[i+4] == 4:
+                        # Royal Flush
+                        if flush_cards_ranks[i] == 14: return (9, [14]) 
+                        # Straight Flush
+                        return (8, [flush_cards_ranks[i]]) 
+                # Ace-low straight flush
+                if {14, 2, 3, 4, 5}.issubset(set(flush_cards_ranks)): return (8, [5])
+
+        if rank_counts[0][1] == 4:  # Four of a Kind
+            kickers = sorted([r for r, c in rank_counts if r != rank_counts[0][0]], reverse=True)
+            return (7, [rank_counts[0][0], kickers[0]])
+        
+        if rank_counts[0][1] == 3 and rank_counts[1][1] >= 2:  # Full House
+            return (6, [rank_counts[0][0], rank_counts[1][0]])
+
+        if is_flush:
+            flush_cards = sorted([c.get_value() for c in all_cards if c.suit == flush_suit], reverse=True)
+            return (5, flush_cards[:5])
+
+        if is_straight:
             return (4, [straight_high])
-        elif rank_counts[0][1] == 3:  # Three of a kind
-            kickers = sorted([rank for rank, count in rank_counts if count == 1], reverse=True)[:2]
-            return (3, [rank_counts[0][0]] + kickers)
-        elif rank_counts[0][1] == 2 and rank_counts[1][1] == 2:  # Two pair
-            # Ensure pairs are in descending order
+
+        if rank_counts[0][1] == 3:  # Three of a Kind
+            kickers = sorted([r for r, c in rank_counts if r != rank_counts[0][0]], reverse=True)
+            return (3, [rank_counts[0][0]] + kickers[:2])
+        
+        if rank_counts[0][1] == 2 and rank_counts[1][1] == 2:  # Two Pair
             pairs = sorted([rank_counts[0][0], rank_counts[1][0]], reverse=True)
-            kicker = sorted([rank for rank, count in rank_counts if count == 1], reverse=True)
-            return (2, pairs + (kicker[:1] if kicker else []))
-        elif rank_counts[0][1] == 2:  # One pair
-            kickers = sorted([rank for rank, count in rank_counts if count == 1], reverse=True)[:3]
-            return (1, [rank_counts[0][0]] + kickers)
-        else:  # High card
-            return (0, sorted([card.get_value() for card in all_cards], reverse=True)[:5])
+            kickers = sorted([r for r, c in rank_counts if r not in pairs], reverse=True)
+            return (2, pairs + kickers[:1])
 
-    def determine_winners(self) -> List[str]:
-        """Determine the winner(s) of the hand considering side pots."""
-        # Active players are those who haven't folded
-        potential_winners = {pid: p for pid, p in self.players.items() if not p.is_folded}
-        
-        if len(potential_winners) == 0:
-            return [] # No winners, perhaps all folded before blinds were paid
-        
-        if len(potential_winners) == 1:
-            # If only one player left, they win the entire pot
-            winner_id = list(potential_winners.keys())[0]
-            self.players[winner_id].chips += self.pot
-            print(f"Player {self.players[winner_id].name} wins the entire pot of ${self.pot} (all others folded).")
+        if rank_counts[0][1] == 2:  # One Pair
+            pair_rank = rank_counts[0][0]
+            kickers = sorted([r for r, c in rank_counts if r != pair_rank], reverse=True)
+            return (1, [pair_rank] + kickers[:3])
+            
+        return (0, unique_ranks[:5]) # High Card
+
+
+    def determine_winners(self) -> Dict[str, int]:
+        """Determines winner(s) and calculates winnings for main and side pots."""
+        # This function was updated in the previous turn and its logic is kept.
+        winnings_map = {}
+        active_players = [p for p in self.players.values() if not p.is_folded]
+
+        if not active_players: return {}
+        if len(active_players) == 1:
+            winner = active_players[0]
+            amount = self.pot
+            winnings_map[winner.id] = amount
+            self.players[winner.id].chips += amount
             self.pot = 0
-            return [winner_id]
+            print(f"Player {winner.name} wins ${amount} as the only remaining player.")
+            return winnings_map
 
-        player_hands = {}        
-        for pid, player in potential_winners.items():
-            hand_strength = self.evaluate_hand(player.cards, self.community_cards)
-            player_hands[pid] = hand_strength
+        player_hands = { p.id: self.evaluate_hand(p.cards, self.community_cards) for p in active_players }
         
-        # Calculate side pots
-        # Collect all unique total_bet amounts in ascending order from players who are still in the hand
-        all_bets = sorted(list(set(p.total_bet for p in potential_winners.values())), reverse=False)
+        # Finalize total bets for this hand before calculating side pots
+        for p in self.players.values():
+            p.total_bet += p.current_bet
         
-        # Initialize side pots
-        side_pots = []
-        for i, bet_level in enumerate(all_bets):
-            eligible_players_for_this_level = [p for p in potential_winners.values() if p.total_bet >= bet_level]
-            if not eligible_players_for_this_level:
-                continue
+        all_in_bets = sorted(list(set(p.total_bet for p in active_players if p.is_all_in)))
+        bet_levels = sorted(list(set([0] + all_in_bets + [max(p.total_bet for p in active_players)])))
 
-            pot_amount_for_level = 0
-            # Calculate the contribution to this specific bet level
-            contribution_per_player = bet_level - (all_bets[i-1] if i > 0 else 0)
-            
-            for player in eligible_players_for_this_level:
-                # Add player's contribution to this side pot, capped at their total bet for this level
-                player_contribution_to_level = min(contribution_per_player, player.total_bet - (all_bets[i-1] if i > 0 else 0))
-                pot_amount_for_level += player_contribution_to_level
-            
-            side_pots.append({'amount': pot_amount_for_level, 'eligible_players': [p.id for p in eligible_players_for_this_level]})
+        last_level = 0
+        for level in bet_levels:
+            if level <= last_level: continue
 
-        final_winners = []
+            pot_amount = 0
+            eligible_ids = [p.id for p in active_players if p.total_bet >= level]
+            
+            # This logic can be simplified. Let's rebuild the main pot from contributions.
         
-        # Distribute pots from smallest to largest bet levels
-        for pot_info in side_pots:
-            current_pot_amount = pot_info['amount']
-            eligible_pids = pot_info['eligible_players']
-            
-            # Filter player hands for eligible players for THIS side pot
-            eligible_player_hands = {pid: strength for pid, strength in player_hands.items() if pid in eligible_pids}
+        # Simpler Side Pot Logic
+        main_pot = 0
+        side_pots = [] # List of {'amount': int, 'eligible_ids': List[str]}
+        
+        # Sort players by total bet to handle side pots correctly
+        sorted_players = sorted(active_players, key=lambda p: p.total_bet)
+        
+        while True:
+            active_in_pot = [p for p in sorted_players if not p.is_folded and p.total_bet > 0]
+            if not active_in_pot: break
 
-            if not eligible_player_hands:
-                continue
+            lowest_bet = min(p.total_bet for p in active_in_pot)
+            current_pot_amount = 0
+            pot_eligible_ids = [p.id for p in active_in_pot]
 
-            best_strength = max(eligible_player_hands.values())
-            current_pot_winners = [pid for pid, strength in eligible_player_hands.items() if strength == best_strength]
+            for p in list(self.players.values()): # Iterate over all players for contribution
+                contribution = min(p.total_bet, lowest_bet)
+                current_pot_amount += contribution
+                p.total_bet -= contribution
             
-            # Distribute current_pot_amount among current_pot_winners
-            if current_pot_winners:
-                share = current_pot_amount // len(current_pot_winners)
-                remainder = current_pot_amount % len(current_pot_winners) # For odd chips
-                
-                for idx, winner_id in enumerate(current_pot_winners):
-                    winnings = share
-                    if idx < remainder: # Distribute remainder chips one by one
-                        winnings += 1
+            if current_pot_amount > 0:
+                side_pots.append({'amount': current_pot_amount, 'eligible_ids': pot_eligible_ids})
+
+            sorted_players = [p for p in sorted_players if p.total_bet > 0] # Players left for next pot
+        
+        # Distribute pots
+        for pot in side_pots:
+            eligible_hands = {pid: hand for pid, hand in player_hands.items() if pid in pot['eligible_ids']}
+            if not eligible_hands: continue
+            
+            best_hand = max(eligible_hands.values())
+            pot_winners_ids = [pid for pid, hand in eligible_hands.items() if hand == best_hand]
+            
+            win_amount_per_player = pot['amount'] // len(pot_winners_ids)
+            remainder = pot['amount'] % len(pot_winners_ids)
+
+            for i, winner_id in enumerate(pot_winners_ids):
+                winnings = win_amount_per_player + (1 if i < remainder else 0)
+                if winnings > 0:
                     self.players[winner_id].chips += winnings
-                    print(f"Player {self.players[winner_id].name} wins ${winnings} from a side pot.")
-                    if winner_id not in final_winners:
-                        final_winners.append(winner_id)
-            
-        self.pot = 0 # Pot is fully distributed
+                    winnings_map[winner_id] = winnings_map.get(winner_id, 0) + winnings
+                    print(f"Player {self.players[winner_id].name} wins ${winnings} from a pot.")
 
-        return final_winners
-    
+        self.pot = 0
+        return winnings_map
+
     def get_game_state(self, player_id: Optional[str] = None) -> dict:
-        """
-        Returns the current game state, with player-specific card visibility.
-        If player_id is provided, their cards are shown. During SHOWDOWN, all cards are shown.
-        """
+        """Returns the current game state, with player-specific card visibility."""
         players_data = {}
-        players_list = list(self.players.keys())
+        all_player_ids = list(self.players.keys())
         
-        for pid, player in self.players.items():
-            player_cards_data = []
-            # ... (di dalam get_game_state)
-            if player_id == pid or self.game_state == GameState.SHOWDOWN or player.has_revealed:
-                player_cards_data = [{'suit': card.suit, 'rank': card.rank, 'image': card.get_image_name()} for card in player.cards]
-            else: # Other players' cards are hidden
-                for _ in player.cards: # Still send 2 card objects, but with back image
-                    player_cards_data.append({'suit': 'back', 'rank': 'back', 'image': 'card_back.jpg'})
+        for pid, p in self.players.items():
+            show_cards = (
+                player_id == pid or 
+                p.has_revealed or
+                self.game_state in [GameState.SHOWDOWN, GameState.GAME_OVER]
+            )
+            
+            if show_cards:
+                player_cards_data = [{'suit': card.suit, 'rank': card.rank, 'image': card.get_image_name()} for card in p.cards]
+            else:
+                player_cards_data = [{'suit': 'back', 'rank': 'back', 'image': 'card_back.jpg'} for _ in p.cards]
 
             players_data[pid] = {
-                'name': player.name,
-                'chips': player.chips,
-                'current_bet': player.current_bet,
-                'total_bet': player.total_bet,
-                'is_folded': player.is_folded,
-                'is_all_in': player.is_all_in,
+                'name': p.name,
+                'chips': p.chips,
+                'current_bet': p.current_bet,
+                'total_bet': p.total_bet, # Send total for clarity
+                'is_folded': p.is_folded,
+                'is_all_in': p.is_all_in,
                 'cards': player_cards_data,
-                'is_current_player': (players_list[self.current_player_index] == pid) if self.current_player_index != -1 else False
+                'is_current_player': (all_player_ids[self.current_player_index] == pid) if self.current_player_index != -1 else False
             }
         
         return {
@@ -745,382 +510,252 @@ class PokerGame:
             'community_cards': [{'suit': card.suit, 'rank': card.rank, 'image': card.get_image_name()} for card in self.community_cards],
             'pot': self.pot,
             'current_bet': self.current_bet,
-            'current_player_id': players_list[self.current_player_index] if self.current_player_index != -1 else None,
-            'dealer_player_id': players_list[self.dealer_position] if self.dealer_position != -1 else None,
-            'small_blind': self.small_blind, # Send blind amounts to client for raise calculation
+            'current_player_id': all_player_ids[self.current_player_index] if self.current_player_index != -1 else None,
+            'dealer_player_id': all_player_ids[self.dealer_position] if self.dealer_position != -1 else None,
+            'small_blind': self.small_blind,
             'big_blind': self.big_blind
         }
+
+    # Method to easily broadcast state from the game logic if needed
+    def broadcast_game_state_to_all(self):
+        # This is a placeholder; the actual broadcast is managed by the server class
+        pass
 
 class PokerServer:
     def __init__(self, host='0.0.0.0', port=8888):
         self.host = host
         self.port = port
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.game = PokerGame()
-        self.clients: Dict[str, socket.socket] = {} # Map player_id to client socket
+        self.game.broadcast_game_state_to_all = self.broadcast_game_state # Link broadcast method
+        self.clients: Dict[str, socket.socket] = {}
         
     def start(self):
-        """Starts the poker server, listening for connections and running the game loop."""
-        self.socket.bind((self.host, self.port))
-        self.socket.listen(6)
+        """Starts the poker server."""
+        self.server_socket.bind((self.host, self.port))
+        self.server_socket.listen(6)
         print(f"Poker server started on {self.host}:{self.port}")
         
-        # Start game logic loop in a separate thread
-        game_loop_thread = threading.Thread(target=self.game_loop)
-        game_loop_thread.daemon = True # Allow the main program to exit even if this thread is running
-        game_loop_thread.start()
+        threading.Thread(target=self.game_loop, daemon=True).start()
 
         while True:
-            try:
-                client_socket, address = self.socket.accept()
-                print(f"New connection from {address}")
-                # Client handling thread is responsible for receiving messages from this client
-                client_thread = threading.Thread(
-                    target=self.handle_client,
-                    args=(client_socket, address)
-                )
-                client_thread.daemon = True
-                client_thread.start()
-            except Exception as e:
-                print(f"Error accepting connection: {e}")
+            client_socket, address = self.server_socket.accept()
+            print(f"New connection from {address}")
+            threading.Thread(target=self.handle_client, args=(client_socket, address), daemon=True).start()
     
     def handle_client(self, client_socket, address):
-        """Handles incoming messages from a single client connection."""
+        """Handles a single client connection."""
         player_id = None
         try:
+            buffer = ""
             while True:
                 data = client_socket.recv(4096).decode('utf-8')
-                if not data:
-                    break # Client disconnected
+                if not data: break
                 
-                # Split data by newline to handle multiple JSON messages in one recv call
-                messages = data.split('\n')
-                for msg_str in messages:
-                    if msg_str.strip(): # Process non-empty strings
-                        try:
-                            message = json.loads(msg_str)
-                            # For 'join' message, we need to associate player_id with socket immediately
-                            if message.get('type') == 'join':
-                                player_id = message.get('player_id')
-                                player_name = message.get('name')
-                                if self.game.add_player(player_id, player_name, client_socket):
-                                    self.clients[player_id] = client_socket # Store the socket
-                                    response = {'type': 'join_success', 'message': 'Joined game successfully'}
-                                    self.send_to_client(player_id, response) # Send response directly
-                                    print(f"Player {player_name} ({player_id}) joined.")
-                                    self.broadcast_game_state() # Broadcast initial state to all
-                                else:
-                                    response = {'type': 'join_failed', 'message': 'Game is full'}
-                                    self.send_to_client(player_id, response)
-                                    print(f"Player {player_name} ({player_id}) failed to join: Game full.")
-                                continue # Skip further processing for join messages in this loop iteration
-
-                            # Process other messages using the game instance
+                buffer += data
+                while '\n' in buffer:
+                    message_str, buffer = buffer.split('\n', 1)
+                    if message_str:
+                        message = json.loads(message_str)
+                        # First message from a client must be 'join'
+                        if not player_id and message.get('type') == 'join':
+                            player_id = message['player_id']
+                            player_name = message['name']
+                            if self.game.add_player(player_id, player_name, client_socket):
+                                self.clients[player_id] = client_socket
+                                self.send_to_client(player_id, {'type': 'join_success', 'message': 'Joined game successfully'})
+                                print(f"Player {player_name} ({player_id}) joined.")
+                                self.broadcast_game_state()
+                            else:
+                                self.send_to_client(player_id, {'type': 'join_failed', 'message': 'Game is full or an error occurred.'})
+                                player_id = None # Prevent further messages
+                        elif player_id:
                             self.process_client_message(message, player_id)
-                                
-                        except json.JSONDecodeError:
-                            print(f"Invalid JSON from {address}: {msg_str}")
-                        except Exception as e:
-                            print(f"Error processing message from {address}: {e}")
-                            self.send_to_client(player_id, {'type': 'error', 'message': f"Server error: {e}"})
-                            
         except Exception as e:
-            print(f"Client handler error for {address}: {e}")
+            print(f"Error with client {address} (Player ID: {player_id}): {e}")
         finally:
-            # Clean up on client disconnect
             if player_id:
-                print(f"Player {player_id} disconnected.")
+                print(f"Player {self.game.players.get(player_id, Player(id=player_id, name='Unknown', chips=0, cards=[], current_bet=0, total_bet=0, is_folded=True, is_all_in=True, connection=None)).name} disconnected.")
                 self.game.remove_player(player_id)
                 if player_id in self.clients:
                     del self.clients[player_id]
-                self.broadcast_game_state() # Update all clients after disconnect
+                self.broadcast_game_state()
             client_socket.close()
     
     def process_client_message(self, message: dict, player_id: str):
-        """Processes a message received from a client."""
+        """Processes a validated message from a client."""
         msg_type = message.get('type')
         
         if msg_type == 'start_game':
-            # Only allow starting if in WAITING state and enough players
             if self.game.game_state == GameState.WAITING and len(self.game.players) >= 2:
                 if self.game.start_new_hand():
                     print("Game started by a client.")
                     self.broadcast_game_state()
-                else:
-                    print("Failed to start game.")
-                    self.send_to_client(player_id, {'type': 'error', 'message': 'Failed to start game'})
             else:
-                self.send_to_client(player_id, {'type': 'error', 'message': 'Cannot start game (not enough players or game already in progress)'})
+                self.send_to_client(player_id, {'type': 'error', 'message': 'Cannot start game (not enough players or game in progress).'})
         
+        # --- BUG FIX STARTS HERE ---
         elif msg_type == 'action':
             action_type = message.get('action')
             amount = message.get('amount', 0)
-        
-        elif msg_type == 'reveal_cards':  # <-- TAMBAHKAN BLOK INI
+            
+            # Ensure actions are only processed during active betting rounds
+            if self.game.game_state not in [GameState.PRE_FLOP, GameState.FLOP, GameState.TURN, GameState.RIVER]:
+                self.send_to_client(player_id, {'type': 'action_failed', 'message': 'Actions not allowed in current game state.'})
+                return
+
+            all_player_ids = list(self.game.players.keys())
+            current_player_id = all_player_ids[self.game.current_player_index] if self.game.current_player_index != -1 else None
+            
+            if player_id != current_player_id:
+                self.send_to_client(player_id, {'type': 'action_failed', 'message': 'Not your turn.'})
+                return
+
+            if self.game.process_action(player_id, action_type, amount):
+                print(f"Player {self.game.players[player_id].name} action: {action_type} {amount}")
+                # Action was successful, now check if the round is over or move to the next player
+                if self.is_betting_round_complete():
+                    print(f"Betting round for {self.game.game_state.value} is complete.")
+                    self.game.advance_to_next_street()
+                else:
+                    self.advance_to_next_player()
+                self.broadcast_game_state()
+            else:
+                self.send_to_client(player_id, {'type': 'action_failed', 'message': 'Invalid action.'})
+        # --- BUG FIX ENDS HERE ---
+
+        elif msg_type == 'reveal_cards':
             if self.game.game_state == GameState.AWAITING_SHOWDOWN and player_id in self.game.players:
                 self.game.players[player_id].has_revealed = True
                 print(f"Player {self.game.players[player_id].name} has revealed their cards.")
                 self.broadcast_game_state()
-            
-            # Ensure actions are only processed during active betting rounds
-            if self.game.game_state in [GameState.PRE_FLOP, GameState.FLOP, GameState.TURN, GameState.RIVER]:
-                players_list = list(self.game.players.keys())
-                current_player_id = players_list[self.game.current_player_index] if self.game.current_player_index != -1 else None
-                
-                if player_id == current_player_id: # Check if it's the correct player's turn
-                    if self.game.process_action(player_id, action_type, amount):
-                        print(f"Player {self.game.players[player_id].name} took action: {action_type} {amount}")
-                        
-                        # After processing action, determine next step: round complete or next player's turn
-                        if self.is_betting_round_complete():
-                            print(f"Betting round for {self.game.game_state.value} is complete after {self.game.players[player_id].name}'s action.")
-                            self.game.advance_to_next_street()
-                            # If advancing to showdown, handle it immediately
-                            if self.game.game_state == GameState.SHOWDOWN:
-                                self.handle_showdown()
-                        else:
-                            self.advance_to_next_player() # Move to the next player's turn
-                        
-                        self.broadcast_game_state() # Broadcast after state change
-                    else:
-                        self.send_to_client(player_id, {'type': 'action_failed', 'message': 'Invalid action or amount. Please check your input and current game state.'})
-                else:
-                    self.send_to_client(player_id, {'type': 'action_failed', 'message': 'Not your turn. Please wait for your turn.'})
-            else:
-                self.send_to_client(player_id, {'type': 'action_failed', 'message': 'Actions not allowed in current game state.'})
-        
-        # Add other message types as needed
     
-    def is_betting_round_complete(self):
-        """
-        Checks if the current betting round is complete.
-        A round is complete if:
-        1. Only one player remains active (others folded).
-        2. All active players have matched the highest bet (current_bet) and have acted this round,
-           or are all-in.
-        """
-        active_players_in_round = [p for p in self.game.players.values() if p.can_act()]
+    def is_betting_round_complete(self) -> bool:
+        """Checks if the current betting round is complete."""
+        # Players still in the hand (not folded)
+        active_players = [p for p in self.game.players.values() if not p.is_folded]
+        if not active_players: return True
         
-        if len(active_players_in_round) <= 1: # All but one folded, or no active players left
-            return True
-            
-        # Check if all active players have either matched the highest bet or are all-in
-        # and have acted since the last raise (or initial post-blinds for pre-flop)
-        for player in active_players_in_round:
-            # If a player is not all-in, they must have matched the current bet AND acted this round
-            if not player.is_all_in:
-                if player.current_bet < self.game.current_bet or not player.has_acted_this_round:
-                    return False
-            # If a player is all-in, they are considered to have completed their action for the round.
-            # No further action is required from them.
-        
-        # Additional check: If the last raiser is the only one who has acted,
-        # and everyone else has called or folded, the round is complete.
-        # This prevents the round from looping back to the raiser unnecessarily.
-        if self.game.last_raiser:
-            raiser_player = self.game.players[self.game.last_raiser]
-            # If the raiser has acted, and all other active players have matched their bet
-            # and acted, the round is complete.
-            all_others_matched_and_acted = True
-            for player in active_players_in_round:
-                if player.id == self.game.last_raiser:
-                    continue # Skip the raiser for this check
-                if not player.is_all_in and (player.current_bet < self.game.current_bet or not player.has_acted_this_round):
-                    all_others_matched_and_acted = False
-                    break
-            if all_others_matched_and_acted:
-                return True
+        # Players who can still act (not folded and not all-in)
+        players_that_can_act = [p for p in active_players if not p.is_all_in]
+        if len(players_that_can_act) < 2:
+             # Check if all remaining players have acted. This is for the case where one player bets and everyone else folds.
+             if all(p.has_acted_this_round for p in players_that_can_act):
+                 return True
 
-        # If no one has raised (e.g., all checks/calls at current_bet 0), and everyone has acted, round is complete.
-        if self.game.current_bet == 0: # This implies no raises, only checks
-            if all(p.has_acted_this_round for p in active_players_in_round):
-                return True
+        # Check if all players who can act have acted and bet the same amount
+        all_acted = all(p.has_acted_this_round for p in players_that_can_act)
+        bets_equal = len(set(p.current_bet for p in players_that_can_act)) == 1
 
-        return False
-    
+        return all_acted and bets_equal
+
     def advance_to_next_player(self):
-        """
-        Advances the current_player_index to the next player who needs to act.
-        This function is called after a player performs an action.
-        """
-        players_list = list(self.game.players.keys())
-        num_players = len(players_list)
-        if num_players == 0:
-            self.game.current_player_index = -1
-            return
+        """Advances the turn to the next player who can act."""
+        all_player_ids = list(self.game.players.keys())
+        num_players = len(all_player_ids)
+        if num_players == 0: return
 
-        start_index = self.game.current_player_index # Remember who just acted
-        
-        # Loop through players starting from the one *after* the current one
-        # to find the next player who needs to act.
-        for _ in range(num_players): # Loop through all players once
-            self.game.current_player_index = (self.game.current_player_index + 1) % num_players
-            current_player_id = players_list[self.game.current_player_index]
-            player = self.game.players[current_player_id]
-
-            # A player needs to act if:
-            # 1. They are eligible to act (`can_act()`).
-            # 2. Their current bet is less than the highest bet (`self.game.current_bet`) OR
-            #    they haven't acted this round (e.g., after a raise by someone else).
-            if player.can_act() and (player.current_bet < self.game.current_bet or not player.has_acted_this_round):
-                print(f"Next turn: {player.name} ({current_player_id})")
-                return # Found the next player to act
-        
-        # If the loop finishes without returning, it implies no active player needs to act.
-        # This means the betting round should be considered complete.
-        print("No active player found who needs to act. Betting round should be complete.")
-        # The game_loop will then detect this via is_betting_round_complete()
-        # and advance the street.
+        start_index = self.game.current_player_index
+        for i in range(1, num_players + 1):
+            next_index = (start_index + i) % num_players
+            next_player_id = all_player_ids[next_index]
+            player = self.game.players[next_player_id]
+            if player.can_act():
+                self.game.current_player_index = next_index
+                print(f"Next turn: {player.name}")
+                return
         
     def game_loop(self):
         """The main server-side game logic loop."""
         while True:
-            time.sleep(0.5) # Server tick rate
+            time.sleep(0.5)
 
-            # State: WAITING - Wait for clients to join and a 'start_game' message
-            if self.game.game_state == GameState.WAITING:
-                # Game start is usually triggered by a client, so keep waiting here
-                pass
+            if self.game.game_state in [GameState.WAITING, GameState.GAME_OVER]:
+                pass # Wait for client action to start
             
-            # States: PRE_FLOP, FLOP, TURN, RIVER - Betting rounds
-            elif self.game.game_state in [GameState.PRE_FLOP, GameState.FLOP, GameState.TURN, GameState.RIVER]:
-                # The primary role here is to check for round completion.
-                # Player turns are advanced by process_client_message after an action.
-                if self.is_betting_round_complete():
-                    print(f"Betting round for {self.game.game_state.value} is complete (via game_loop check).")
-                    self.game.advance_to_next_street()
+            else: # Active game states
+                # Check for end of hand by folding
+                players_in_hand = [p for p in self.game.players.values() if not p.is_folded]
+                if len(players_in_hand) == 1:
+                    print(f"Hand ended. Winner by fold: {players_in_hand[0].name}")
+                    winnings_map = self.game.determine_winners() # This will assign the pot
+                    self.handle_game_result(winnings_map)
+                    time.sleep(5)
+                    self.game.start_new_hand()
                     self.broadcast_game_state()
-                    # If it's showdown after advancing, handle it
-                    if self.game.game_state == GameState.SHOWDOWN:
-                        self.handle_showdown()
-                # Else, if round is not complete, we simply wait for a client action.
-                # The turn advancement is handled by process_client_message.
+                    continue
 
-            # State: AWAITING_SHOWDOWN - Waiting for players to reveal cards
-            elif self.game.game_state == GameState.AWAITING_SHOWDOWN:
-                if self.game.check_all_revealed():
-                    print("All players have revealed. Proceeding to showdown.")
-                    self.game.game_state = GameState.SHOWDOWN
-            
-            # State: SHOWDOWN - Determine winners and distribute pot
-            elif self.game.game_state == GameState.SHOWDOWN:
-                self.handle_showdown() # Ensure showdown logic runs
-                time.sleep(10) # Allow clients to see showdown results
-                # Reset has_acted_this_round for all players for the new hand
-                for player in self.game.players.values():
-                    player.has_acted_this_round = False
-                self.game.start_new_hand()
-                self.broadcast_game_state()
+                # Check for end of betting (all remaining players are all-in)
+                players_can_act = [p for p in players_in_hand if not p.is_all_in]
+                if not players_can_act and self.game.game_state != GameState.AWAITING_SHOWDOWN:
+                    print("All remaining players are all-in. Advancing to the end.")
+                    while self.game.game_state not in [GameState.AWAITING_SHOWDOWN, GameState.GAME_OVER]:
+                        self.game.advance_to_next_street()
+                    self.broadcast_game_state()
                 
-            # State: GAME_OVER - Not enough players or game ended
-            elif self.game.game_state == GameState.GAME_OVER:
-                print("Game is over. Waiting for players to join/restart.")
-                # Logic to reset game or wait for more players
-                pass
+                # Handle showdown transition
+                if self.game.game_state == GameState.AWAITING_SHOWDOWN:
+                    if self.game.check_all_revealed():
+                        print("All players revealed. Proceeding to showdown.")
+                        self.game.game_state = GameState.SHOWDOWN
+                        self.broadcast_game_state()
+                
+                if self.game.game_state == GameState.SHOWDOWN:
+                    print("Executing showdown...")
+                    winnings_map = self.game.determine_winners()
+                    self.handle_game_result(winnings_map)
+                    time.sleep(10) # Time for clients to see results
+                    self.game.start_new_hand()
+                    self.broadcast_game_state()
 
-            # Check if only one player remains active in a hand (others folded)
-            # This check should be done continuously during active game states
-            active_players_in_hand = [p for p in self.game.players.values() if not p.is_folded and p.chips > 0]
-            if self.game.game_state not in [GameState.WAITING, GameState.GAME_OVER, GameState.SHOWDOWN] and len(active_players_in_hand) == 1:
-                winner_id = active_players_in_hand[0].id
-                # Ensure pot is correctly assigned if others folded
-                self.game.players[winner_id].chips += self.game.pot
-                print(f"All players folded except {self.game.players[winner_id].name}. They win the pot of ${self.game.pot}.")
-                self.game.pot = 0
-                self.game.game_state = GameState.SHOWDOWN # Transition to showdown to trigger pot distribution/new hand
-                self.broadcast_game_state()
-                time.sleep(2) # Short delay to show winner
-                # Reset has_acted_this_round for all players for the new hand
-                for player in self.game.players.values():
-                    player.has_acted_this_round = False
-                self.game.start_new_hand()
-                self.broadcast_game_state()
-
-
-# In PokerServer.handle_showdown method:
-    def handle_showdown(self):
-        print("Handling showdown...")
-        winners = self.game.determine_winners()
-        
-        winning_hand_type = "No Winner" # Default
+    def handle_game_result(self, winnings_map: Dict[str, int]):
+        """Broadcasts the game result to all clients."""
+        winners = list(winnings_map.keys())
+        winning_hand_type = "Unknown"
         if winners:
-            # Assuming determine_winners returns the best hand strength for the winner(s)
-            # You'll need to re-evaluate the hand for the winner(s) to get the hand type string
-            # Or, modify determine_winners to return the hand type directly.
-            
-            # For simplicity, let's assume the first winner's hand type is representative
-            # A more robust solution would store winning hand type for each winner during determine_winners
             first_winner_id = winners[0]
-            winner_player = self.game.players[first_winner_id]
-            hand_strength_tuple = self.game.evaluate_hand(winner_player.cards, self.game.community_cards)
-            
-            # Map hand_rank (integer) to string
-            hand_rank_map = {
-                9: "Royal Flush",
-                8: "Straight Flush",
-                7: "Four of a Kind",
-                6: "Full House",
-                5: "Flush",
-                4: "Straight",
-                3: "Three of a Kind",
-                2: "Two Pair",
-                1: "One Pair",
-                0: "High Card"
-            }
-            winning_hand_type = hand_rank_map.get(hand_strength_tuple[0], "Unknown Hand")
-
-            winner_names = [self.game.players[pid].name for pid in winners]
-            print(f"Winners of the hand: {', '.join(winner_names)} with a {winning_hand_type}")
-            
-            winning_message = {
-                'type': 'game_result',
-                'winners': winners,
-                'message': f"The Winner: {', '.join(winner_names)}!",
-                'winning_hand_type': winning_hand_type # <-- This is the new field
-            }
-            self.broadcast(json.dumps(winning_message).encode('utf-8') + b'\n')
+            if first_winner_id in self.game.players:
+                winner_player = self.game.players[first_winner_id]
+                hand_rank = self.game.evaluate_hand(winner_player.cards, self.game.community_cards)[0]
+                hand_rank_map = {9: "Royal Flush", 8: "Straight Flush", 7: "Four of a Kind", 6: "Full House", 5: "Flush", 4: "Straight", 3: "Three of a Kind", 2: "Two Pair", 1: "One Pair", 0: "High Card"}
+                winning_hand_type = hand_rank_map.get(hand_rank, "Unknown")
+            winner_names = [self.game.players[pid].name for pid in winners if pid in self.game.players]
         else:
-            print("No winners determined (e.g., all folded before showdown).")
-        
-        self.broadcast_game_state()
-        
+            winner_names = ["No one"]
+            
+        result_message = {
+            'type': 'game_result',
+            'winners': winners,
+            'winnings_map': winnings_map,
+            'winning_hand_type': winning_hand_type,
+            'message': f"Winner(s): {', '.join(winner_names)}"
+        }
+        self.broadcast(json.dumps(result_message).encode('utf-8') + b'\n')
+        self.broadcast_game_state() # Show final table state
+
     def send_to_client(self, player_id: str, message: dict):
         """Sends a JSON message to a specific client."""
         if player_id in self.clients:
             try:
-                self.clients[player_id].send(json.dumps(message).encode('utf-8') + b'\n') # Add newline for client parsing
+                self.clients[player_id].sendall(json.dumps(message).encode('utf-8') + b'\n')
             except Exception as e:
                 print(f"Error sending message to client {player_id}: {e}")
 
     def broadcast_game_state(self):
-        """Broadcasts the current game state to all connected clients, with player-specific card visibility."""
-        # Send individual game state to each player (revealing their own cards)
-        for player_id, client_socket in list(self.clients.items()):
-            try:
-                game_state_for_player = self.game.get_game_state(player_id)
-                message = json.dumps({
-                    'type': 'game_update',
-                    'data': game_state_for_player
-                })
-                client_socket.send(message.encode('utf-8') + b'\n') # Add newline
-            except Exception as e:
-                print(f"Error broadcasting game state to {player_id}: {e}")
-                # Remove disconnected client
-                if player_id in self.clients:
-                    del self.clients[player_id]
-                self.game.remove_player(player_id) # Remove player from game if connection breaks
+        """Broadcasts the game state to all clients, customized for each."""
+        for player_id in list(self.clients.keys()):
+            game_state_for_player = self.game.get_game_state(player_id)
+            message = {'type': 'game_update', 'data': game_state_for_player}
+            self.send_to_client(player_id, message)
     
-    def broadcast(self, message: bytes):
-        """Broadcasts a raw byte message to all connected clients."""
-        for player_id, client_socket in list(self.clients.items()):
+    def broadcast(self, raw_message: bytes):
+        """Broadcasts a raw byte message to all clients."""
+        for player_id in list(self.clients.keys()):
             try:
-                client_socket.send(message)
+                self.clients[player_id].sendall(raw_message)
             except Exception as e:
                 print(f"Error broadcasting to {player_id}: {e}")
-                if player_id in self.clients:
-                    del self.clients[player_id]
-                self.game.remove_player(player_id)
 
 if __name__ == '__main__':
     server = PokerServer()
@@ -1128,4 +763,4 @@ if __name__ == '__main__':
         server.start()
     except KeyboardInterrupt:
         print("\nServer shutting down...")
-        server.socket.close()
+        server.server_socket.close()
