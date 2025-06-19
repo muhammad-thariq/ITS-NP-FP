@@ -14,6 +14,7 @@ class GameState(Enum):
     FLOP = "flop"
     TURN = "turn"
     RIVER = "river"
+    AWAITING_SHOWDOWN = "awaiting_showdown"
     SHOWDOWN = "showdown"
     GAME_OVER = "game_over"
 
@@ -73,7 +74,8 @@ class Player:
     is_all_in: bool
     connection: socket.socket
     has_acted_this_round: bool = False # Track if player has acted in current betting round
-    
+    has_revealed: bool = False
+
     def can_act(self):
         """Determines if a player is eligible to make an action."""
         return not self.is_folded and not self.is_all_in and self.chips > 0
@@ -95,7 +97,7 @@ class PokerGame:
         
     def create_deck(self):
         """Creates and shuffles a standard 52-card deck."""
-        suits = ['hearts', 'diamonds', 'clubs', 'spades']
+        suits = ['heart', 'diamonds', 'clubs', 'spades']
         ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'jack', 'queen', 'king', 'ace']
         self.deck = [Card(suit, rank) for suit in suits for rank in ranks]
         random.shuffle(self.deck)
@@ -529,8 +531,16 @@ class PokerGame:
             self.game_state = GameState.RIVER
             print("--- RIVER dealt ---")
         elif self.game_state == GameState.RIVER:
-            self.game_state = GameState.SHOWDOWN
-            print("--- SHOWDOWN ---")
+            self.game_state = GameState.AWAITING_SHOWDOWN
+            print("--- WAITING FOR PLAYERS TO REVEAL CARDS ---")
+
+    def check_all_revealed(self):
+        """Cek apakah semua pemain yang tidak fold sudah membuka kartu."""
+        players_in_hand = [p for p in self.players.values() if not p.is_folded]
+        if not players_in_hand or len(players_in_hand) == 1:
+            return True # Tidak ada yang perlu ditunggu atau hanya 1 pemain tersisa
+        
+        return all(p.has_revealed for p in players_in_hand)
 
     def evaluate_hand(self, player_cards: List[Card], community_cards: List[Card]) -> Tuple[int, List[int]]:
         """Evaluate poker hand strength. Returns (hand_rank, tiebreakers)"""
@@ -711,8 +721,8 @@ class PokerGame:
         
         for pid, player in self.players.items():
             player_cards_data = []
-            # Reveal cards only to the specific player or during showdown
-            if player_id == pid or self.game_state == GameState.SHOWDOWN:
+            # ... (di dalam get_game_state)
+            if player_id == pid or self.game_state == GameState.SHOWDOWN or player.has_revealed:
                 player_cards_data = [{'suit': card.suit, 'rank': card.rank, 'image': card.get_image_name()} for card in player.cards]
             else: # Other players' cards are hidden
                 for _ in player.cards: # Still send 2 card objects, but with back image
@@ -846,6 +856,12 @@ class PokerServer:
         elif msg_type == 'action':
             action_type = message.get('action')
             amount = message.get('amount', 0)
+        
+        elif msg_type == 'reveal_cards':  # <-- TAMBAHKAN BLOK INI
+            if self.game.game_state == GameState.AWAITING_SHOWDOWN and player_id in self.game.players:
+                self.game.players[player_id].has_revealed = True
+                print(f"Player {self.game.players[player_id].name} has revealed their cards.")
+                self.broadcast_game_state()
             
             # Ensure actions are only processed during active betting rounds
             if self.game.game_state in [GameState.PRE_FLOP, GameState.FLOP, GameState.TURN, GameState.RIVER]:
@@ -980,11 +996,17 @@ class PokerServer:
                         self.handle_showdown()
                 # Else, if round is not complete, we simply wait for a client action.
                 # The turn advancement is handled by process_client_message.
+
+            # State: AWAITING_SHOWDOWN - Waiting for players to reveal cards
+            elif self.game.game_state == GameState.AWAITING_SHOWDOWN:
+                if self.game.check_all_revealed():
+                    print("All players have revealed. Proceeding to showdown.")
+                    self.game.game_state = GameState.SHOWDOWN
             
             # State: SHOWDOWN - Determine winners and distribute pot
             elif self.game.game_state == GameState.SHOWDOWN:
                 self.handle_showdown() # Ensure showdown logic runs
-                time.sleep(5) # Allow clients to see showdown results
+                time.sleep(10) # Allow clients to see showdown results
                 # Reset has_acted_this_round for all players for the new hand
                 for player in self.game.players.values():
                     player.has_acted_this_round = False
@@ -1054,7 +1076,7 @@ class PokerServer:
             winning_message = {
                 'type': 'game_result',
                 'winners': winners,
-                'message': f"The winner(s) are: {', '.join(winner_names)}!",
+                'message': f"The Winner: {', '.join(winner_names)}!",
                 'winning_hand_type': winning_hand_type # <-- This is the new field
             }
             self.broadcast(json.dumps(winning_message).encode('utf-8') + b'\n')
