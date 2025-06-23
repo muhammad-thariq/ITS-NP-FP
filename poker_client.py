@@ -52,12 +52,13 @@ class PokerClient:
             self.chip_sound = pygame.mixer.Sound("assets/chip_sound.mp3")
             self.check_sound = pygame.mixer.Sound("assets/check_sound.mp3")
             self.win_sound = pygame.mixer.Sound("assets/win_sound.mp3")
+            self.lose_sound = pygame.mixer.Sound("assets/lose_sound.mp3")
             # --- NEW FEATURE: FOLD SOUND ---
             self.fold_sound = pygame.mixer.Sound("assets/fold_sound.mp3")
 
         except Exception as e:
             print(f"Failed to load audio: {e}")
-            self.button_sound = self.chip_sound = self.check_sound = self.win_sound = self.fold_sound = None
+            self.button_sound = self.chip_sound = self.check_sound = self.win_sound = self.lose_sound = self.fold_sound = None
 
     def load_assets(self):
         """Loads all image assets (backgrounds and cards)."""
@@ -501,10 +502,13 @@ class PokerClient:
         if is_winner:
             self.play_bgm("win_music.mp3")
             self.result_bg_image = self.raw_backgrounds['win_screen']
+            pygame.mixer.music.stop()
             self.play_sfx(self.win_sound)
         else:
             self.play_bgm("lose_music.mp3")
             self.result_bg_image = self.raw_backgrounds['lose_screen']
+            pygame.mixer.music.stop()
+            self.play_sfx(self.lose_sound)
 
         # Format the text
         winner_names = message.get('message', 'Winner!')
