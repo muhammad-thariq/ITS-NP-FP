@@ -153,7 +153,7 @@ class PokerClient:
         content_container.place(relx=0.5, rely=0.5, anchor='center')
         tk.Label(content_container, text="Server IP:", bg='#6A0B0A', fg='white', font=('Arial', 12)).pack(pady=(20, 2), padx=40)
         self.ip_entry = tk.Entry(content_container, font=('Arial', 12), justify='center')
-        self.ip_entry.insert(0, "localhost")
+        self.ip_entry.insert(0, "localhost") # change IP
         self.ip_entry.pack(pady=5, padx=10)
         tk.Label(content_container, text="Your Name:", bg='#6A0B0A', fg='white', font=('Arial', 12)).pack(pady=(10, 2))
         self.name_entry = tk.Entry(content_container, font=('Arial', 12), justify='center')
